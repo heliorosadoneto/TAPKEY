@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+# Encerra o app e o agente embutido antes de remover/atualizar.
+pkill -f /opt/tapkey-desktop/tapkey_desktop 2>/dev/null || true
+pkill -f /opt/tapkey-desktop/agent/agent.py 2>/dev/null || true
+exit 0

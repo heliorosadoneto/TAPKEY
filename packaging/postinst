@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+# Prepara o agente embutido e atualiza caches do desktop.
+chmod 755 /opt/tapkey-desktop/agent/agent.py /opt/tapkey-desktop/tapkey_desktop || true
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "TAPKEY: python3 não encontrado (necessário para o agente)." >&2
+fi
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+echo "TAPKEY Desktop instalado. Abra pelo menu de aplicativos ou rode: tapkey-desktop"
+echo "O token e o QR são criados por usuário em ~/.config/tapkey na primeira execução."
+exit 0

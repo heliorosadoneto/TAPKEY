@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=TAPKEY Desktop
+GenericName=Controle remoto de atalhos
+Comment=Controle seu notebook pelo celular
+Exec=tapkey-desktop
+Icon=tapkey-desktop
+Terminal=false
+Categories=Utility;Network;
+Keywords=tapkey;celular;atalhos;remoto;
+StartupWMClass=tapkey_desktop
