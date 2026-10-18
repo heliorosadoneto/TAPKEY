@@ -36,3 +36,14 @@ systemctl --user status meu-notebook-agent.service
 - Só abre aplicativos que estão na lista de `.desktop` escaneada; nunca comandos arbitrários.
 - Use apenas em rede Wi-Fi confiável; o tráfego é HTTP simples com token.
 - Se usar firewall (ufw): `sudo ufw allow 8765/tcp`
+
+## Bloquear / desbloquear
+
+| Rota | Descrição |
+|---|---|
+| `GET /session` | `{locked, unlock_allowed}` |
+| `POST /lock` | Bloqueia a sessão (`loginctl lock-session`, reserva: `cinnamon-screensaver-command --lock`) |
+| `GET /challenge` | Nonce de uso único (20 s, preso ao IP) |
+| `POST /unlock` | `{nonce, proof}` com `proof = HMAC-SHA256(token, nonce)`; `403` se desativado, `429` acima de 5/min por IP, `400` se o desafio for inválido |
+
+O desbloqueio fica desligado até `~/.config/tapkey/settings.json` ter `{"allow_unlock": true}` (o TAPKEY Desktop grava isso em "Permitir desbloqueio pelo celular"). Todo bloqueio/desbloqueio é registrado em `~/.config/tapkey/events.log` e em `clients.json` (campo `events`).

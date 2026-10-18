@@ -30,7 +30,9 @@ class StatusDot extends StatelessWidget {
 /// Barra fina (retrato): TAPKEY + status.
 class AppHeader extends StatelessWidget {
   final bool connected;
-  const AppHeader({super.key, required this.connected});
+  final bool locked;
+  final VoidCallback onLock;
+  const AppHeader({super.key, required this.connected, required this.locked, required this.onLock});
 
   @override
   Widget build(BuildContext context) {
@@ -40,13 +42,20 @@ class AppHeader extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 18),
         child: Row(
           children: [
-            Mascot(connected: connected, size: 36),
+            Mascot(connected: connected, size: 38),
             const SizedBox(width: 10),
             const Text(
               'TAPKEY',
               style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, letterSpacing: 3.5, color: kAccent),
             ),
             const Spacer(),
+            IconButton(
+              tooltip: 'Bloquear / desbloquear',
+              visualDensity: VisualDensity.compact,
+              onPressed: onLock,
+              icon: Icon(locked ? Icons.lock : Icons.lock_open, size: 19, color: locked ? kAccent : kMuted),
+            ),
+            const SizedBox(width: 4),
             StatusDot(connected: connected),
             const SizedBox(width: 7),
             Text(connected ? 'Conectado' : 'Desconectado',

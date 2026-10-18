@@ -276,7 +276,7 @@ _clients_lock = threading.Lock()
 _clients_saved = 0.0
 
 
-def record_client(ip, action=None):
+def record_client(ip, action=None, force_save=False):
     """Guarda quem está falando com o agente (lido pelo TAPKEY Desktop)."""
     global _clients_saved
     now = time.time()
@@ -287,16 +287,171 @@ def record_client(ip, action=None):
         if action:
             c["launches"] += 1
             c["last_app"] = action
-        if action or now - _clients_saved > 2:
+        if action or force_save or now - _clients_saved > 2:
             _clients_saved = now
             data = sorted(_clients.values(), key=lambda x: -x["last_seen"])
             try:
                 tmp = CLIENTS_FILE + ".tmp"
                 with open(tmp, "w") as f:
-                    json.dump({"updated": now, "clients": data}, f)
+                    json.dump({"updated": now, "clients": data, "events": _events}, f)
                 os.replace(tmp, CLIENTS_FILE)
             except OSError:
                 pass
+
+
+SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
+EVENTS_FILE = os.path.join(CONFIG_DIR, "events.log")
+_events = []
+NONCE_TTL = 20  # segundos de validade do desafio
+UNLOCK_MAX_PER_MIN = 5
+_nonces = {}  # nonce -> (expira, ip)
+_unlock_attempts = {}  # ip -> [timestamps]
+_sec_lock = threading.Lock()
+
+
+def read_settings():
+    try:
+        with open(SETTINGS_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def unlock_allowed():
+    """Opção 'Permitir desbloqueio pelo celular' (padrão: DESLIGADA)."""
+    return bool(read_settings().get("allow_unlock", False))
+
+
+def log_event(ip, event, ok=True, detail=""):
+    """Registra bloqueio/desbloqueio no log e na lista de conexões recentes."""
+    now = time.time()
+    entry = {"t": now, "ip": ip, "event": event, "ok": ok, "detail": detail}
+    with _clients_lock:
+        _events.insert(0, entry)
+        del _events[30:]
+    try:
+        with open(EVENTS_FILE, "a") as f:
+            f.write("%s %s %s ok=%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), ip, event, ok, detail))
+    except OSError:
+        pass
+    record_client(ip, force_save=True)
+
+
+def _session_env():
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    env["LANGUAGE"] = "C"
+    env.setdefault("DISPLAY", ":0")
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", "unix:path=%s/bus" % env["XDG_RUNTIME_DIR"])
+    return env
+
+
+def _run(cmd, timeout=6):
+    try:
+        r = subprocess.run(cmd, env=_session_env(), capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout + r.stderr).strip()
+    except (OSError, subprocess.SubprocessError) as ex:
+        return 1, str(ex)
+
+
+def _session_id():
+    sid = os.environ.get("XDG_SESSION_ID")
+    if sid:
+        return sid
+    code, out = _run(["loginctl", "list-sessions", "--no-legend"])
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] == os.environ.get("USER", ""):
+            return parts[0]
+    return ""
+
+
+def is_locked():
+    """True se a tela está bloqueada (Cinnamon screensaver ou LockedHint do logind)."""
+    if shutil.which("cinnamon-screensaver-command"):
+        code, out = _run(["cinnamon-screensaver-command", "--query"])
+        low = out.lower()
+        # a mensagem pode vir traduzida ("ativo"/"inativo")
+        if "inactive" in low or "inativ" in low:
+            return False
+        if "active" in low or "ativ" in low:
+            return True
+    sid = _session_id()
+    if sid:
+        code, out = _run(["loginctl", "show-session", sid, "-p", "LockedHint", "--value"])
+        return out.strip() == "yes"
+    return False
+
+
+def _wait_state(want_locked, seconds=2.5):
+    end = time.time() + seconds
+    while time.time() < end:
+        if is_locked() == want_locked:
+            return True
+        time.sleep(0.25)
+    return is_locked() == want_locked
+
+
+def do_lock():
+    sid = _session_id()
+    if shutil.which("loginctl") and sid:
+        _run(["loginctl", "lock-session", sid])
+        if _wait_state(True):
+            return True, "Notebook bloqueado", "loginctl"
+    if shutil.which("cinnamon-screensaver-command"):
+        _run(["cinnamon-screensaver-command", "--lock"])
+        if _wait_state(True):
+            return True, "Notebook bloqueado", "cinnamon-screensaver-command"
+    return False, "Não consegui bloquear a tela", ""
+
+
+def do_unlock():
+    if not is_locked():
+        return True, "A tela já estava desbloqueada", ""
+    sid = _session_id()
+    if shutil.which("loginctl") and sid:
+        _run(["loginctl", "unlock-session", sid])
+        if _wait_state(False):
+            return True, "Notebook desbloqueado", "loginctl"
+    if shutil.which("cinnamon-screensaver-command"):
+        _run(["cinnamon-screensaver-command", "--deactivate"])
+        if _wait_state(False):
+            return True, "Notebook desbloqueado", "cinnamon-screensaver-command"
+    return False, "O Cinnamon não aceitou o desbloqueio remoto. Digite a senha no notebook.", ""
+
+
+def new_challenge(ip):
+    now = time.time()
+    nonce = secrets.token_hex(16)
+    with _sec_lock:
+        for k in [k for k, v in _nonces.items() if v[0] < now]:
+            del _nonces[k]
+        _nonces[nonce] = (now + NONCE_TTL, ip)
+    return nonce
+
+
+def consume_challenge(nonce, proof, ip):
+    """Desafio de uso único, curto e atrelado ao IP; prova = HMAC-SHA256(token, nonce)."""
+    now = time.time()
+    with _sec_lock:
+        item = _nonces.pop(nonce, None)
+    if not item or item[0] < now or item[1] != ip:
+        return False
+    expected = hmac.new(TOKEN.encode(), nonce.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, str(proof or ""))
+
+
+def rate_limited(ip):
+    now = time.time()
+    with _sec_lock:
+        lst = [t for t in _unlock_attempts.get(ip, []) if now - t < 60]
+        if len(lst) >= UNLOCK_MAX_PER_MIN:
+            _unlock_attempts[ip] = lst
+            return True
+        lst.append(now)
+        _unlock_attempts[ip] = lst
+    return False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -329,6 +484,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/ping":
             self._send(200, {"ok": True, "host": socket.gethostname()})
+        elif path == "/session":
+            self._send(200, {"locked": is_locked(), "unlock_allowed": unlock_allowed()})
+        elif path == "/challenge":
+            self._send(200, {"nonce": new_challenge(self.client_address[0]), "expires_in": NONCE_TTL})
         elif path == "/apps":
             apps = scan_apps(force=True)
             lst = [{"id": a["id"], "name": a["name"], "icon": a["icon"]}
@@ -348,24 +507,54 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, {"error": "Não encontrado"})
 
+    def _body(self):
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            return json.loads(self.rfile.read(min(n, 65536)) or b"{}")
+        except Exception:
+            return None
+
     def do_POST(self):
         path = urlparse(self.path).path
         if not self._auth():
             return
-        if path != "/launch":
-            self._send(404, {"error": "Não encontrado"})
-            return
-        try:
-            n = int(self.headers.get("Content-Length", "0"))
-            data = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
-            app_id = str(data["id"])
-        except Exception:
+        ip = self.client_address[0]
+        data = self._body()
+        if data is None:
             self._send(400, {"error": "Requisição inválida"})
             return
-        ok, msg = launch(app_id)
-        if ok:
-            record_client(self.client_address[0], (scan_apps().get(app_id) or {}).get("name", app_id))
-        self._send(200 if ok else 404, {"ok": ok, "message": msg})
+        if path == "/launch":
+            try:
+                app_id = str(data["id"])
+            except KeyError:
+                self._send(400, {"error": "Requisição inválida"})
+                return
+            ok, msg = launch(app_id)
+            if ok:
+                record_client(ip, (scan_apps().get(app_id) or {}).get("name", app_id))
+            self._send(200 if ok else 404, {"ok": ok, "message": msg})
+        elif path == "/lock":
+            ok, msg, how = do_lock()
+            log_event(ip, "Bloqueio", ok, how or msg)
+            self._send(200 if ok else 500, {"ok": ok, "message": msg, "locked": is_locked()})
+        elif path == "/unlock":
+            if not unlock_allowed():
+                log_event(ip, "Desbloqueio negado", False, "opção desativada")
+                self._send(403, {"error": "O desbloqueio pelo celular está desativado. Ative em TAPKEY Desktop > Permitir desbloqueio pelo celular."})
+                return
+            if rate_limited(ip):
+                log_event(ip, "Desbloqueio negado", False, "limite de tentativas")
+                self._send(429, {"error": "Muitas tentativas. Aguarde um minuto."})
+                return
+            if not consume_challenge(str(data.get("nonce", "")), data.get("proof"), ip):
+                log_event(ip, "Desbloqueio negado", False, "desafio inválido")
+                self._send(400, {"error": "Desafio inválido ou expirado. Tente de novo."})
+                return
+            ok, msg, how = do_unlock()
+            log_event(ip, "Desbloqueio", ok, how or msg)
+            self._send(200 if ok else 500, {"ok": ok, "message": msg, "locked": is_locked()})
+        else:
+            self._send(404, {"error": "Não encontrado"})
 
 
 def main():

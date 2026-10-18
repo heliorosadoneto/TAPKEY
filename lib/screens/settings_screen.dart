@@ -100,6 +100,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
           label: const Text('Salvar e testar'),
           style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
         ),
+        const SizedBox(height: 28),
+        const Text('Protetor de tela',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: kAccent)),
+        const SizedBox(height: 4),
+        const Text('Mostra o Tapi dormindo depois de um tempo sem tocar no app. Toque para acordar.',
+            style: TextStyle(color: kMuted)),
+        const SizedBox(height: 12),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          for (final o in const [(0, 'Desligado'), (30, '30 s'), (60, '1 min'), (120, '2 min'), (300, '5 min')])
+            ChoiceChip(
+              label: Text(o.$2),
+              selected: widget.state.screensaverSeconds == o.$1,
+              onSelected: (_) => widget.state.setScreensaver(o.$1),
+            ),
+        ]),
+        const SizedBox(height: 24),
       ]),
     );
   }

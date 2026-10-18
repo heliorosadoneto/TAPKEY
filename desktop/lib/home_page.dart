@@ -111,6 +111,15 @@ class _HomePageState extends State<HomePage> {
               value: a.autostart,
               onChanged: (v) => a.setAutostart(v),
             ),
+            SwitchListTile(
+              dense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+              title: const Text('Permitir desbloqueio pelo celular', style: TextStyle(fontSize: 13)),
+              subtitle: const Text('Exige token, desafio de uso único e biometria/PIN no celular',
+                  style: TextStyle(fontSize: 11, color: kMuted)),
+              value: a.allowUnlock,
+              onChanged: (v) => a.setAllowUnlock(v),
+            ),
           ]
               .animate(interval: 60.ms)
               .fadeIn(duration: 350.ms)
@@ -121,7 +130,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _header(bool up) => Row(children: [
-        Mascot(connected: up, size: 38),
+        Mascot(connected: up, size: 40),
         const SizedBox(width: 10),
         const Text('TAPKEY',
             style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, letterSpacing: 3.5, color: kAccent)),
@@ -258,6 +267,22 @@ class _HomePageState extends State<HomePage> {
                     style: const TextStyle(fontSize: 12)),
               ),
               Text(_ago(c.lastSeen), style: const TextStyle(color: kMuted, fontSize: 11)),
+            ]),
+          ),
+      if (_showClients)
+        for (final e in a.events.take(5))
+          Padding(
+            padding: const EdgeInsets.fromLTRB(28, 2, 4, 2),
+            child: Row(children: [
+              Icon(e.event.contains('Desbloq') ? Icons.lock_open : Icons.lock_outline,
+                  size: 12, color: e.ok ? kMuted : kErr),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('${e.event} · ${e.ip}',
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 12, color: e.ok ? Colors.white : kErr)),
+              ),
+              Text(_ago(e.time), style: const TextStyle(color: kMuted, fontSize: 11)),
             ]),
           ),
     ]);

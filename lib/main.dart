@@ -6,6 +6,9 @@ import 'screens/settings_screen.dart';
 import 'state.dart';
 import 'theme.dart';
 import 'widgets/header.dart';
+import 'widgets/island.dart';
+import 'widgets/lock_sheet.dart';
+import 'widgets/screensaver.dart';
 import 'widgets/mascot.dart';
 
 void main() async {
@@ -33,7 +36,7 @@ class TapkeyApp extends StatelessWidget {
         behavior: HitTestBehavior.translucent,
         onPointerDown: (e) => mascotController.setPointer(e.position),
         onPointerMove: (e) => mascotController.setPointer(e.position),
-        child: child,
+        child: AppOverlays(state: state, child: child!),
       ),
       home: Shell(state: state),
     );
@@ -56,6 +59,13 @@ class _ShellState extends State<Shell> {
   void initState() {
     super.initState();
     widget.state.addListener(_rebuild);
+    widget.state.onConnectionChanged = (ok) {
+      if (ok) {
+        island.show('Notebook conectado', kind: IslandKind.success);
+      } else {
+        island.show('Notebook desconectado', kind: IslandKind.error);
+      }
+    };
   }
 
   @override
@@ -129,6 +139,11 @@ class _ShellState extends State<Shell> {
                     child: StatusDot(connected: s.connected, size: 8),
                   ),
                   const Spacer(),
+                  IconButton(
+                    tooltip: 'Bloquear / desbloquear',
+                    icon: Icon(s.locked ? Icons.lock : Icons.lock_open, color: s.locked ? kAccent : kMuted),
+                    onPressed: () => showLockSheet(context, s),
+                  ),
                   for (var i = 0; i < _dests.length; i++)
                     IconButton(
                       tooltip: _dests[i].$3,
@@ -156,7 +171,11 @@ class _ShellState extends State<Shell> {
       body: SafeArea(
         bottom: false,
         child: Column(children: [
-          AppHeader(connected: s.connected),
+          AppHeader(
+            connected: s.connected,
+            locked: s.locked,
+            onLock: () => showLockSheet(context, s),
+          ),
           Expanded(child: content),
         ]),
       ),

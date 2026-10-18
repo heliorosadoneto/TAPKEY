@@ -5,6 +5,7 @@ import '../state.dart';
 import '../theme.dart';
 import '../widgets/app_icon.dart';
 import '../widgets/glow_tile.dart';
+import '../widgets/island.dart';
 import '../widgets/mascot.dart';
 import 'add_screen.dart';
 
@@ -13,18 +14,17 @@ class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key, required this.state});
 
   Future<void> _launch(BuildContext context, AppItem a) async {
-    final m = ScaffoldMessenger.of(context);
+    island.show('Abrindo ${a.name}…', kind: IslandKind.info, duration: const Duration(seconds: 6));
+    mascotController.working(true);
     final (ok, msg) = await state.launch(a);
-    if (ok) mascotController.happy();
-    m.hideCurrentSnackBar();
-    m.showSnackBar(SnackBar(
-      content: Row(children: [
-        Icon(ok ? Icons.rocket_launch : Icons.error_outline, color: ok ? kAccent : kErr),
-        const SizedBox(width: 12),
-        Expanded(child: Text(msg)),
-      ]),
-      duration: const Duration(seconds: 2),
-    ));
+    mascotController.working(false);
+    if (ok) {
+      mascotController.happy();
+      island.show('Abrindo ${a.name}…', kind: IslandKind.success);
+    } else {
+      mascotController.error();
+      island.show(msg, kind: IslandKind.error, duration: const Duration(seconds: 3));
+    }
   }
 
   void _options(BuildContext context, AppItem a) {

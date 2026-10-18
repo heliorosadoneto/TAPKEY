@@ -1,10 +1,12 @@
 <div align="center">
 
+<img src="docs/logo.png" alt="Logo do TAPKEY: o mascote Tapi" width="120">
+
 # TAPKEY
 
 ### Seu notebook na palma da mão. Um toque, e abre.
 
-Atalhos no celular que abrem aplicativos no seu notebook Linux, pelo Wi‑Fi, com animações fluidas e um mascote que reage a cada toque.
+Atalhos no celular que abrem aplicativos no seu notebook Linux (e bloqueiam ou desbloqueiam a tela), pelo Wi‑Fi, com animações fluidas e o **Tapi**, um mascote que reage a cada toque.
 
 [![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter&logoColor=white)](https://flutter.dev)
 [![Dart](https://img.shields.io/badge/Dart-3.x-0175C2?logo=dart&logoColor=white)](https://dart.dev)
@@ -19,11 +21,18 @@ Atalhos no celular que abrem aplicativos no seu notebook Linux, pelo Wi‑Fi, co
 
 <table align="center">
   <tr>
-    <td align="center"><b>Retrato</b><br><img src="docs/screenshots/portrait.png" width="200" alt="TAPKEY em retrato"></td>
-    <td align="center"><b>Paisagem (tela cheia)</b><br><img src="docs/screenshots/landscape.png" width="430" alt="TAPKEY em paisagem"></td>
-    <td align="center"><b>TAPKEY Desktop</b><br><img src="docs/screenshots/desktop.png" width="200" alt="TAPKEY Desktop"></td>
+    <td align="center"><b>Retrato</b><br><img src="docs/screenshots/portrait.png" width="190" alt="TAPKEY em retrato"></td>
+    <td align="center"><b>Ilha (evento)</b><br><img src="docs/screenshots/island.png" width="190" alt="Ilha no topo mostrando Abrindo Spotify"></td>
+    <td align="center"><b>Bloquear / Desbloquear</b><br><img src="docs/screenshots/lock.png" width="190" alt="Painel de bloqueio"></td>
+    <td align="center"><b>Protetor de tela</b><br><img src="docs/screenshots/screensaver.png" width="190" alt="Tapi dormindo no protetor de tela"></td>
+  </tr>
+  <tr>
+    <td colspan="3" align="center"><b>Paisagem (tela cheia)</b><br><img src="docs/screenshots/landscape.png" width="520" alt="TAPKEY em paisagem"></td>
+    <td align="center"><b>TAPKEY Desktop</b><br><img src="docs/screenshots/desktop.png" width="190" alt="TAPKEY Desktop"></td>
   </tr>
 </table>
+
+<sub>Capturas geradas de forma reprodutível por <code>flutter test test/screenshots_test.dart</code> (dados de demonstração) e do app desktop em execução.</sub>
 
 ---
 
@@ -44,19 +53,36 @@ Atalhos no celular que abrem aplicativos no seu notebook Linux, pelo Wi‑Fi, co
 | **Pareamento por QR** | Escaneie o QR do TAPKEY Desktop; IP, porta e token são preenchidos sozinhos |
 | **Paisagem em tela cheia** | Grade ocupa toda a tela, cartões sempre quadrados e responsivos |
 | **Tema minimalista** | Grafite com um único acento prata, brilho sutil só no acento |
-| **Mascote animado** | Desenhado em código (`CustomPainter`), personagem original |
+| **Bloquear / Desbloquear** | Bloqueie o notebook pelo celular; desbloqueio opcional, com biometria/PIN, desafio de uso único e limite de tentativas |
+| **Protetor de tela** | Após inatividade (30 s a 5 min), o Tapi dorme num fundo preto (OLED) e quica como o logo do DVD |
+| **Ilha** | Pílula no topo com mola mostra eventos ("Abrindo Spotify…", "Notebook desconectado", "Bloqueado") |
+| **Tapi, o mascote** | Desenhado em código (`CustomPainter`), personagem original com antena, emoções e partículas |
 | **TAPKEY Desktop** | App do notebook com status, QR, token, bandeja e início com o sistema |
 
-### O mascote
+### Tapi, o mascote
 
-Um pequeno "squircle" com dois olhos grandes, feito só com `CustomPainter` e molas (sem imagens nem Lottie):
+<img src="docs/logo.png" alt="Tapi" width="96" align="right">
 
-- respira e pisca de tempos em tempos;
-- as pupilas seguem o último toque na tela;
-- entra com um pulo e acena ao abrir o app;
-- se amassa e fica emburrado quando você toca nele; três toques rápidos o deixam tonto (olhos em espiral);
-- dá um pulinho feliz quando um atalho abre com sucesso;
-- fica preocupado quando o notebook está desconectado.
+**Tapi** é um pequeno robô de corpo trapezoidal arredondado com uma **antena de ponta luminosa**, desenhado só com `CustomPainter`, molas e curvas (sem imagens nem Lottie). É um personagem original do projeto.
+
+- **Motor de estados** com valores atual/alvo e suavização exponencial (transições sempre contínuas);
+- **olhos esféricos** (esclera, íris e brilho) que seguem o toque; piscadas aleatórias (2,2 a 5,4 s, às vezes duplas) e respiração;
+- **squash & stretch** com keyframes e curvas cúbicas/*back*; a **antena** é uma mola física (rigidez 60, amortecimento 9) que balança com os movimentos;
+- **emoções**: feliz (olhos em arco), amor (corações e rubor), surpreso, orgulhoso (estrelas), bocejo (z), piscadinha, olhos de coração/estrela, tontura (espiral + giro), preocupado e erro (tremida);
+- **partículas** de corações, estrelas, faíscas e "z";
+- **reage a eventos**: atalho aberto = pulo feliz + giro; notebook desconectado = preocupado; abrindo = concentrado; erro = tremida; concluído = giro com faíscas;
+- **toque simples** amassa; **toque longo** é carinho (amor); três toques seguidos o deixam tonto;
+- **economia de bateria**: o relógio de animação para quando o Tapi fica parado por um tempo.
+
+O mesmo Tapi aparece no cabeçalho do TAPKEY Desktop. O ícone do app (celular, desktop e `.deb`) é gerado por código a partir do próprio Tapi (`flutter test test/gen_icons_test.dart`).
+
+### Ilha
+
+Uma pílula no topo da tela que "salta" com mola (resposta ≈ 0,5 s, amortecimento ≈ 0,72) e fecha em ≈ 340 ms. O Tapi mora dentro dela e muda de humor conforme o evento.
+
+### Protetor de tela
+
+Depois de um tempo sem toques (**30 s, 1, 2, 5 min ou desligado**; padrão 1 min, em *Configurações*), o app entra em tela cheia imersiva com fundo preto (bom para OLED): o Tapi dorme flutuando com "z", derivando pela tela como o logo do DVD e se amassando ao bater nas bordas, com um relógio discreto. Mantém a tela acesa (`wakelock_plus`). Um toque faz a tela voltar com fade e o Tapi acorda (espreguiça e acena). Funciona em retrato e paisagem.
 
 ## Início rápido (3 passos)
 
@@ -168,6 +194,21 @@ Sem `config.local.json` o app compila normalmente; basta parear pelo QR ou digit
 Digite em *Configurações* o IP do notebook, a porta (`8765`) e o token (mostrado no TAPKEY Desktop ou em `~/.config/tapkey/token`).
 </details>
 
+## Bloquear e desbloquear pelo celular
+
+- **Bloquear**: toque no cadeado no topo do app (ou no trilho, em paisagem) e em *Bloquear*. Funciona sempre que o token é válido.
+- **Desbloquear** é **opcional e vem DESLIGADO**. Ative no TAPKEY Desktop em **"Permitir desbloqueio pelo celular"** (gravado em `~/.config/tapkey/settings.json`). Com a opção desligada o agente responde `403` e o app mostra "O desbloqueio pelo celular está desativado…".
+- Ao desbloquear, o celular pede **biometria ou PIN/padrão/senha** (`local_auth`, `biometricOnly: false`) antes de falar com o notebook.
+- Cada bloqueio/desbloqueio fica registrado na lista de conexões recentes do TAPKEY Desktop e em `~/.config/tapkey/events.log`.
+
+**Como o desbloqueio é protegido** (além do token):
+
+1. o celular pede `GET /challenge` e recebe um *nonce* aleatório, **de uso único, válido por 20 s e preso ao IP** de quem pediu;
+2. responde `POST /unlock {nonce, proof}` com `proof = HMAC‑SHA256(token, nonce)` (o token nunca viaja de novo dentro do corpo);
+3. o agente compara em tempo constante, consome o nonce e **limita a 5 tentativas por minuto por IP** (`429` depois disso).
+
+> **Limitação conhecida:** o desbloqueio usa `loginctl unlock-session` (com `cinnamon-screensaver-command --deactivate` como reserva). Testado e **funcionando no Linux Mint 22.1 Cinnamon**; em outros ambientes gráficos que não obedeçam ao sinal `Unlock` do logind, o *bloqueio* funciona mas o desbloqueio pode não ter efeito. O tráfego continua em HTTP simples: use só em Wi‑Fi confiável.
+
 ## API do agente
 
 Todas as rotas exigem o cabeçalho `X-Token`.
@@ -178,6 +219,10 @@ Todas as rotas exigem o cabeçalho `X-Token`.
 | `GET` | `/apps` | Lista `[{id, name, icon}]` dos aplicativos instalados |
 | `GET` | `/icon/<id>` | Ícone do aplicativo em PNG (404 se não houver) |
 | `POST` | `/launch` | Abre o aplicativo: corpo `{"id": "firefox"}` |
+| `GET` | `/session` | `{locked, unlock_allowed}`: estado da sessão do notebook |
+| `POST` | `/lock` | Bloqueia a tela |
+| `GET` | `/challenge` | Nonce de uso único (20 s) para o desbloqueio |
+| `POST` | `/unlock` | Desbloqueia: `{nonce, proof}`; `403` se desativado, `429` se exceder 5/min, `400` se o desafio for inválido |
 
 ```bash
 curl -H "X-Token: $(cat ~/.config/tapkey/token)" http://IP:8765/apps
@@ -187,6 +232,7 @@ curl -H "X-Token: $(cat ~/.config/tapkey/token)" http://IP:8765/apps
 
 - **Token compartilhado** gerado na primeira execução, salvo em `~/.config/tapkey/token` (permissão 600) e exigido em toda requisição.
 - **Somente aplicativos listados**: o agente só abre IDs encontrados nos `.desktop` escaneados; a linha `Exec` nunca vem do celular.
+- **Desbloqueio** desligado por padrão, com desafio de uso único (HMAC), limite de 5 tentativas/min e registro de todo bloqueio/desbloqueio.
 - **Rede local**: o tráfego é HTTP simples; use apenas em Wi‑Fi confiável. Com `ufw`, libere `8765/tcp` só para a sua rede.
 - **Nada secreto no repositório**: IP e token reais ficam em `config.local.json` (ignorado pelo git).
 
@@ -196,13 +242,15 @@ curl -H "X-Token: $(cat ~/.config/tapkey/token)" http://IP:8765/apps
 TAPKEY/
 ├── lib/                    # app do celular (Flutter)
 │   ├── screens/            # início, adicionar atalho, configurações, leitor de QR
-│   ├── widgets/            # cartão animado, cabeçalho, mascote
+│   ├── widgets/            # cartão animado, cabeçalho, Tapi (mascote), ilha, protetor de tela, painel de bloqueio
 │   ├── config.dart         # padrões de conexão (sem segredos)
 │   └── state.dart          # favoritos, conexão e chamadas ao agente
 ├── desktop/                # TAPKEY Desktop (Flutter Linux)
 ├── agent/                  # agente Python (agent.py, start.sh, serviço systemd)
 ├── packaging/              # build_deb.sh, postinst, prerm, atalho .desktop
-├── docs/                   # demo.gif e capturas de tela
+├── assets/icon/            # ícone gerado por código (Tapi)
+├── test/                   # gerador de ícones, poses e capturas de tela
+├── docs/                   # logo, demo.gif e capturas de tela
 ├── install.sh              # instalação em uma linha
 └── config.local.example.json
 ```
@@ -214,7 +262,9 @@ TAPKEY/
 - [x] Pareamento por QR e TAPKEY Desktop com bandeja
 - [ ] Vários notebooks (aba Dispositivos)
 - [ ] HTTPS com certificado autoassinado
-- [ ] Ações além de abrir apps (volume, mídia, bloquear tela)
+- [x] Bloquear e desbloquear a tela pelo celular
+- [x] Protetor de tela, ilha e mascote Tapi
+- [ ] Ações além de abrir apps (volume, mídia)
 - [ ] Pasta/grupos de atalhos e temas
 
 ## Licença

@@ -24,6 +24,23 @@ class ClientInfo {
       );
 }
 
+class EventInfo {
+  final DateTime time;
+  final String ip;
+  final String event;
+  final bool ok;
+  final String detail;
+  const EventInfo(this.time, this.ip, this.event, this.ok, this.detail);
+
+  factory EventInfo.fromJson(Map<String, dynamic> j) => EventInfo(
+        DateTime.fromMillisecondsSinceEpoch(((j['t'] as num) * 1000).round()),
+        (j['ip'] ?? '') as String,
+        (j['event'] ?? '') as String,
+        j['ok'] == true,
+        (j['detail'] ?? '') as String,
+      );
+}
+
 /// Controla o agente Python: iniciar/parar, token, autostart e status.
 class AgentService extends ChangeNotifier {
   static final int port = int.tryParse(Platform.environment['TAPKEY_PORT'] ?? '') ?? 8765;
@@ -40,6 +57,9 @@ class AgentService extends ChangeNotifier {
   bool autostart = false;
   String? error;
   List<ClientInfo> clients = [];
+  List<EventInfo> events = [];
+  bool allowUnlock = false;
+  late final String settingsFile = '$configDir/settings.json';
   int totalLaunches = 0;
   int _lastLaunches = -1;
   void Function()? onNewLaunch;
@@ -51,6 +71,7 @@ class AgentService extends ChangeNotifier {
     await Directory(configDir).create(recursive: true);
     await _loadToken();
     autostart = File(autostartFile).existsSync();
+    allowUnlock = _readSettings()['allow_unlock'] == true;
     await refresh();
     _timer = Timer.periodic(const Duration(seconds: 2), (_) => refresh());
   }
@@ -63,6 +84,22 @@ class AgentService extends ChangeNotifier {
 
   String get pairUri => 'tapkey://pair?host=$lanIp&port=$port&token=${Uri.encodeQueryComponent(token)}';
   String get address => '$lanIp:$port';
+
+  Map<String, dynamic> _readSettings() {
+    try {
+      return jsonDecode(File(settingsFile).readAsStringSync()) as Map<String, dynamic>;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// "Permitir desbloqueio pelo celular" (padrão: desligado).
+  Future<void> setAllowUnlock(bool on) async {
+    final m = _readSettings()..['allow_unlock'] = on;
+    await File(settingsFile).writeAsString(jsonEncode(m));
+    allowUnlock = on;
+    notifyListeners();
+  }
 
   Future<void> _loadToken() async {
     final f = File(tokenFile);
@@ -124,6 +161,7 @@ class AgentService extends ChangeNotifier {
     final up = await _ping();
     var list = <ClientInfo>[];
     var launches = 0;
+    var evs = <EventInfo>[];
     try {
       final f = File(clientsFile);
       if (f.existsSync()) {
@@ -134,11 +172,17 @@ class AgentService extends ChangeNotifier {
             .where((c) => c.ip != '127.0.0.1')
             .toList();
         launches = list.fold(0, (a, c) => a + c.launches);
+        evs = ((j['events'] ?? []) as List)
+            .map((e) => EventInfo.fromJson(e as Map<String, dynamic>))
+            .toList();
       }
     } catch (_) {}
+    final newEvent = evs.isNotEmpty && (events.isEmpty || evs.first.time != events.first.time);
+    events = evs;
     final newLaunch = _lastLaunches >= 0 && launches > _lastLaunches;
     _lastLaunches = launches;
     totalLaunches = launches;
+    if (newEvent) notifyListeners();
     if (up != running || ip != lanIp || list.length != clients.length || newLaunch ||
         (list.isNotEmpty && clients.isNotEmpty && list.first.lastSeen != clients.first.lastSeen)) {
       running = up;

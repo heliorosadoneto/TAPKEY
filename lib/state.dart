@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -30,6 +31,11 @@ class AppState extends ChangeNotifier {
   List<AppItem> favorites = [];
   bool connected = false;
   bool loaded = false;
+  int screensaverSeconds = 60; // 0 = desligado
+  bool locked = false;
+  bool unlockAllowed = false;
+  /// Chamado quando a conexão muda (após a inicialização).
+  void Function(bool connected)? onConnectionChanged;
   Timer? _timer;
 
   String get baseUrl => 'http://$host:$port';
@@ -40,6 +46,7 @@ class AppState extends ChangeNotifier {
     host = _prefs.getString('host') ?? kDefaultHost;
     port = _prefs.getInt('port') ?? kDefaultPort;
     token = _prefs.getString('token') ?? kDefaultToken;
+    screensaverSeconds = _prefs.getInt('screensaver') ?? 60;
     final raw = _prefs.getString('favorites');
     if (raw != null) {
       try {
@@ -79,11 +86,76 @@ class AppState extends ChangeNotifier {
           .timeout(const Duration(seconds: 3));
       ok = r.statusCode == 200;
     } catch (_) {}
-    if (ok != connected) {
+    final changed = ok != connected;
+    if (changed) {
       connected = ok;
       notifyListeners();
+      if (loaded) onConnectionChanged?.call(ok);
     }
+    if (ok) await refreshSession();
     return ok;
+  }
+
+  Future<void> setScreensaver(int seconds) async {
+    screensaverSeconds = seconds;
+    await _prefs.setInt('screensaver', seconds);
+    notifyListeners();
+  }
+
+  /// Estado da sessão do notebook (bloqueado? desbloqueio permitido?).
+  Future<void> refreshSession() async {
+    try {
+      final r = await http
+          .get(Uri.parse('$baseUrl/session'), headers: headers)
+          .timeout(const Duration(seconds: 3));
+      if (r.statusCode == 200) {
+        final j = jsonDecode(r.body) as Map<String, dynamic>;
+        final l = j['locked'] == true, u = j['unlock_allowed'] == true;
+        if (l != locked || u != unlockAllowed) {
+          locked = l;
+          unlockAllowed = u;
+          notifyListeners();
+        }
+      }
+    } catch (_) {}
+  }
+
+  Future<(bool, String)> _post(String path, Map<String, dynamic> body) async {
+    try {
+      final r = await http
+          .post(Uri.parse('$baseUrl$path'),
+              headers: {...headers, 'Content-Type': 'application/json'}, body: jsonEncode(body))
+          .timeout(const Duration(seconds: 12));
+      final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+      if (r.statusCode == 200) return (true, (j['message'] ?? 'Pronto') as String);
+      if (r.statusCode == 401) return (false, 'Token inválido. Verifique em Configurações.');
+      return (false, (j['error'] ?? j['message'] ?? 'Erro ${r.statusCode}') as String);
+    } catch (_) {
+      return (false, 'Notebook desconectado. Verifique o agente e o Wi‑Fi.');
+    }
+  }
+
+  Future<(bool, String)> lockNotebook() async {
+    final res = await _post('/lock', {});
+    await refreshSession();
+    return res;
+  }
+
+  /// Desbloqueio: pede um desafio de uso único e responde com HMAC(token, nonce).
+  Future<(bool, String)> unlockNotebook() async {
+    try {
+      final r = await http
+          .get(Uri.parse('$baseUrl/challenge'), headers: headers)
+          .timeout(const Duration(seconds: 5));
+      if (r.statusCode != 200) return (false, 'Não consegui obter o desafio de segurança.');
+      final nonce = (jsonDecode(r.body) as Map<String, dynamic>)['nonce'] as String;
+      final proof = Hmac(sha256, utf8.encode(token)).convert(utf8.encode(nonce)).toString();
+      final res = await _post('/unlock', {'nonce': nonce, 'proof': proof});
+      await refreshSession();
+      return res;
+    } catch (_) {
+      return (false, 'Notebook desconectado. Verifique o agente e o Wi‑Fi.');
+    }
   }
 
   Future<void> _saveFavs() async {
