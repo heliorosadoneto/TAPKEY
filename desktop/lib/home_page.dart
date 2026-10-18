@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
@@ -56,6 +58,8 @@ class _HomePageState extends State<HomePage> {
     return Theme(
       data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
       child: ExpansionTile(
+        // TAPKEY_EXPAND_SECURITY=1 abre o painel já expandido (usado para gerar capturas de tela)
+        initiallyExpanded: Platform.environment['TAPKEY_EXPAND_SECURITY'] == '1',
         tilePadding: const EdgeInsets.symmetric(horizontal: 4),
         childrenPadding: EdgeInsets.zero,
         dense: true,
@@ -285,6 +289,8 @@ class _HomePageState extends State<HomePage> {
               begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [kCardTop, kCard]),
         ),
         child: Column(children: [
+          // (capturas de tela com TAPKEY_EXPAND_SECURITY=1 omitem o QR)
+          if (Platform.environment['TAPKEY_EXPAND_SECURITY'] != '1')
           Opacity(
             opacity: up ? 1 : 0.35,
             child: Container(
