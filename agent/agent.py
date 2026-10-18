@@ -13,18 +13,28 @@ import secrets
 import shlex
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cursor_bridge  # noqa: E402
 
 PORT = int(os.environ.get("MEU_NOTEBOOK_PORT", "8765"))
 CONFIG_DIR = os.path.expanduser("~/.config/tapkey")
 LEGACY_CONFIG_DIR = os.path.expanduser("~/.config/meu_notebook")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
 CLIENTS_FILE = os.path.join(CONFIG_DIR, "clients.json")
+TLS_DIR = os.path.join(CONFIG_DIR, "tls")
+CERT_FILE = os.path.join(TLS_DIR, "cert.pem")
+KEY_FILE = os.path.join(TLS_DIR, "key.pem")
+FP_FILE = os.path.join(TLS_DIR, "fingerprint")
+HOOK_INFO_FILE = os.path.join(CONFIG_DIR, "hook.json")
+HOOK_PORT = int(os.environ.get("TAPKEY_HOOK_PORT", str(PORT + 1)))
 HOME = os.path.expanduser("~")
 
 APP_DIRS = [
@@ -454,8 +464,56 @@ def rate_limited(ip):
     return False
 
 
+def ensure_cert():
+    """Gera (uma vez por instalação) um certificado autoassinado e retorna o fingerprint SHA-256."""
+    os.makedirs(TLS_DIR, mode=0o700, exist_ok=True)
+    if not (os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE)):
+        openssl = shutil.which("openssl")
+        if not openssl:
+            raise RuntimeError("openssl não encontrado (instale o pacote 'openssl') ou ative o modo HTTP legado.")
+        cmd = [openssl, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+               "-days", "3650", "-subj", "/CN=tapkey-%s" % socket.gethostname(), "-keyout", KEY_FILE, "-out", CERT_FILE]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError("falha ao gerar certificado: %s" % r.stderr.strip())
+        os.chmod(KEY_FILE, 0o600)
+    with open(CERT_FILE) as f:
+        der = ssl.PEM_cert_to_DER_cert(f.read())
+    fp = hashlib.sha256(der).hexdigest()
+    with open(FP_FILE, "w") as f:
+        f.write(fp + "\n")
+    return fp
+
+
+def pair_uri(host, port, token, fp):
+    q = "host=%s&port=%d&token=%s&name=%s" % (host, port, quote(token), quote(socket.gethostname()))
+    if fp:
+        q = "host=%s&port=%d&fp=%s&token=%s&name=%s" % (host, port, fp, quote(token), quote(socket.gethostname()))
+    return "tapkey://pair?" + q
+
+
+def load_hook_secret():
+    p = os.path.join(CONFIG_DIR, "hook_secret")
+    if os.path.exists(p):
+        v = open(p).read().strip()
+        if v:
+            return v
+    v = secrets.token_urlsafe(24)
+    with open(p, "w") as f:
+        f.write(v + "\n")
+    os.chmod(p, 0o600)
+    return v
+
+
+BRIDGE = None
+HOOK_SECRET = ""
+TLS_ON = False
+TLS_FP = ""
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "MeuNotebook/1.0"
+    server_version = "TAPKEY/2.0"
+    timeout = 30
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -488,6 +546,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"locked": is_locked(), "unlock_allowed": unlock_allowed()})
         elif path == "/challenge":
             self._send(200, {"nonce": new_challenge(self.client_address[0]), "expires_in": NONCE_TTL})
+        elif path == "/cursor/state":
+            if self._cursor_enabled():
+                self._send(200, BRIDGE.snapshot())
+        elif path == "/cursor/events":
+            self._sse()
         elif path == "/apps":
             apps = scan_apps(force=True)
             lst = [{"id": a["id"], "name": a["name"], "icon": a["icon"]}
@@ -506,6 +569,32 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, {"error": "Sem ícone"})
         else:
             self._send(404, {"error": "Não encontrado"})
+
+    def _cursor_enabled(self):
+        if not BRIDGE.settings()["enabled"]:
+            self._send(403, {"error": "A integração com o Cursor está desativada. Ative em TAPKEY Desktop > Integrar com o Cursor."})
+            return False
+        return True
+
+    def _sse(self):
+        if not self._cursor_enabled():
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        dead = [False]
+
+        def send(event, data):
+            try:
+                self.wfile.write(("event: %s\ndata: %s\n\n" % (event, json.dumps(data, ensure_ascii=False))).encode("utf-8"))
+                self.wfile.flush()
+            except (OSError, ssl.SSLError):
+                dead[0] = True
+
+        BRIDGE.stream(send, lambda: not dead[0] and not _SHUTDOWN.is_set())
+        self.close_connection = True
 
     def _body(self):
         try:
@@ -533,6 +622,25 @@ class Handler(BaseHTTPRequestHandler):
             if ok:
                 record_client(ip, (scan_apps().get(app_id) or {}).get("name", app_id))
             self._send(200 if ok else 404, {"ok": ok, "message": msg})
+        elif path == "/cursor/approval":
+            if not self._cursor_enabled():
+                return
+            ok, code, msg = BRIDGE.decide(str(data.get("id", "")), str(data.get("decision", "")), ip)
+            self._send(200 if ok else code, {"ok": ok, "message": msg} if ok else {"error": msg})
+        elif path == "/cursor/instruction":
+            code, body = BRIDGE.instruct(ip, data)
+            self._send(code, body)
+        elif path == "/cursor/instruction/cancel":
+            if not self._cursor_enabled():
+                return
+            self._send(200, {"ok": BRIDGE.cancel_instruction(str(data.get("id", "")))})
+        elif path == "/cursor/cli/cancel":
+            if not self._cursor_enabled():
+                return
+            self._send(200, {"ok": BRIDGE.cancel_cli()})
+        elif path == "/cursor/open":
+            code, body = BRIDGE.open_workspace(ip, data.get("workspace_id", ""))
+            self._send(code, body)
         elif path == "/lock":
             ok, msg, how = do_lock()
             log_event(ip, "Bloqueio", ok, how or msg)
@@ -557,24 +665,114 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "Não encontrado"})
 
 
+class QuietServer(ThreadingHTTPServer):
+    """Silencia erros de conexão/handshake TLS (varreduras de rede, clientes que caem)."""
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        et = sys.exc_info()[0]
+        if et and issubclass(et, (OSError, ssl.SSLError)):
+            return
+        super().handle_error(request, client_address)
+
+
+class HookHandler(BaseHTTPRequestHandler):
+    """Listener SOMENTE de loopback usado pelo relay dos hooks do Cursor."""
+    server_version = "TAPKEY-hook/1.0"
+    timeout = 90
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send(self, code, body):
+        b = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        if urlparse(self.path).path == "/status":
+            self._send(200, {"ok": True, "tls": TLS_ON, "fp": TLS_FP, "host": socket.gethostname()})
+        else:
+            self._send(404, {"error": "Não encontrado"})
+
+    def do_POST(self):
+        if urlparse(self.path).path != "/hook":
+            self._send(404, {"error": "Não encontrado"})
+            return
+        if not hmac.compare_digest(self.headers.get("X-Hook-Secret", "").encode(), HOOK_SECRET.encode()):
+            self._send(401, {"error": "segredo inválido"})
+            return
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(min(n, 131072)) or b"{}")
+        except Exception:
+            self._send(400, {"error": "json inválido"})
+            return
+        try:
+            self._send(200, BRIDGE.handle_hook(data) or {})
+        except Exception as ex:  # nunca derruba o Cursor
+            sys.stderr.write("hook erro: %r\n" % (ex,))
+            self._send(200, {})
+
+
+_SHUTDOWN = threading.Event()
+
+
 def main():
-    global TOKEN
+    global TOKEN, BRIDGE, HOOK_SECRET, TLS_ON, TLS_FP
     TOKEN = load_token()
+    HOOK_SECRET = load_hook_secret()
+    BRIDGE = cursor_bridge.Bridge(CONFIG_DIR, read_settings)
     ip = lan_ip()
+    legacy = bool(read_settings().get("legacy_http", False))
+    if not legacy:
+        try:
+            TLS_FP = ensure_cert()
+            TLS_ON = True
+        except RuntimeError as ex:
+            print("ERRO TLS: %s" % ex, file=sys.stderr)
+            sys.exit(2)
+    scheme = "https" if TLS_ON else "http"
     print("=" * 50)
     print(" TAPKEY - agente")
-    print(" Endereço : http://%s:%d" % (ip, PORT))
-    print(" Pareamento: tapkey://pair?host=%s&port=%d&token=%s" % (ip, PORT, TOKEN))
+    print(" Endereço : %s://%s:%d" % (scheme, ip, PORT))
+    if TLS_ON:
+        print(" TLS      : certificado autoassinado, fingerprint SHA-256")
+        print("            %s" % TLS_FP)
+    else:
+        print(" ATENÇÃO  : modo HTTP legado (sem criptografia). Use só em rede confiável.")
+    print(" Pareamento: %s" % pair_uri(ip, PORT, TOKEN, TLS_FP))
     print(" Token    : %s" % TOKEN)
     print(" (token salvo em %s)" % TOKEN_FILE)
     print(" Aplicativos encontrados: %d" % len(scan_apps(force=True)))
     print("=" * 50, flush=True)
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    srv = QuietServer(("0.0.0.0", PORT), Handler)
     srv.daemon_threads = True
+    if TLS_ON:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(CERT_FILE, KEY_FILE)
+        # handshake feito na thread da conexão (não trava o accept)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
+    hook_srv = None
+    try:
+        hook_srv = ThreadingHTTPServer(("127.0.0.1", HOOK_PORT), HookHandler)
+        hook_srv.daemon_threads = True
+        threading.Thread(target=hook_srv.serve_forever, daemon=True).start()
+        with open(HOOK_INFO_FILE, "w") as f:
+            json.dump({"port": HOOK_PORT, "secret": HOOK_SECRET, "pid": os.getpid()}, f)
+        os.chmod(HOOK_INFO_FILE, 0o600)
+    except OSError as ex:
+        print("Aviso: listener de hooks indisponível (%s)" % ex, file=sys.stderr)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\nEncerrado.")
+    finally:
+        _SHUTDOWN.set()
 
 
 if __name__ == "__main__":

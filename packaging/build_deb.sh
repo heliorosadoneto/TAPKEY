@@ -22,7 +22,7 @@ mkdir -p "$STAGE/DEBIAN" "$STAGE/opt/$PKG" "$STAGE/usr/bin" \
 
 cp -a "$BUNDLE/." "$STAGE/opt/$PKG/"
 mkdir -p "$STAGE/opt/$PKG/agent"
-install -m 755 "$ROOT/agent/agent.py" "$STAGE/opt/$PKG/agent/agent.py"
+for f in agent.py cursor_bridge.py tapkey_cursor_hook.py; do install -m 755 "$ROOT/agent/$f" "$STAGE/opt/$PKG/agent/$f"; done
 
 # reduz o tamanho
 find "$STAGE/opt/$PKG" -type f \( -name '*.so' -o -name 'tapkey_desktop' \) ! -name 'libapp.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
@@ -45,7 +45,7 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: Hélio Rosado Neto <heliorosadoneto@users.noreply.github.com>
-Depends: python3, libgtk-3-0, libayatana-appindicator3-1
+Depends: python3, openssl, libgtk-3-0, libayatana-appindicator3-1
 Recommends: librsvg2-bin
 Installed-Size: $SIZE_KB
 Homepage: https://github.com/heliorosadoneto/TAPKEY

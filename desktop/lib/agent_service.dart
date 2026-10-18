@@ -59,6 +59,14 @@ class AgentService extends ChangeNotifier {
   List<ClientInfo> clients = [];
   List<EventInfo> events = [];
   bool allowUnlock = false;
+  bool legacyHttp = false;
+  bool cursorApprovals = false;
+  bool allowInstructions = false;
+  bool cursorHooksInstalled = false;
+  bool tls = true;
+  String fingerprint = '';
+  String cursorMsg = '';
+  static int get hookPort => int.tryParse(Platform.environment['TAPKEY_HOOK_PORT'] ?? '') ?? port + 1;
   late final String settingsFile = '$configDir/settings.json';
   int totalLaunches = 0;
   int _lastLaunches = -1;
@@ -71,7 +79,8 @@ class AgentService extends ChangeNotifier {
     await Directory(configDir).create(recursive: true);
     await _loadToken();
     autostart = File(autostartFile).existsSync();
-    allowUnlock = _readSettings()['allow_unlock'] == true;
+    _loadSettings();
+    await refreshHooksStatus();
     await refresh();
     _timer = Timer.periodic(const Duration(seconds: 2), (_) => refresh());
   }
@@ -82,7 +91,16 @@ class AgentService extends ChangeNotifier {
     super.dispose();
   }
 
-  String get pairUri => 'tapkey://pair?host=$lanIp&port=$port&token=${Uri.encodeQueryComponent(token)}';
+  /// QR de pareamento: com TLS leva o fingerprint SHA-256 do certificado (fixado pelo celular).
+  String get pairUri {
+    final name = Uri.encodeQueryComponent(Platform.localHostname);
+    final t = Uri.encodeQueryComponent(token);
+    if (tls && fingerprint.isNotEmpty) {
+      return 'tapkey://pair?host=$lanIp&port=$port&fp=$fingerprint&token=$t&name=$name';
+    }
+    return 'tapkey://pair?host=$lanIp&port=$port&token=$t&name=$name';
+  }
+
   String get address => '$lanIp:$port';
 
   Map<String, dynamic> _readSettings() {
@@ -93,11 +111,106 @@ class AgentService extends ChangeNotifier {
     }
   }
 
+  void _loadSettings() {
+    final m = _readSettings();
+    allowUnlock = m['allow_unlock'] == true;
+    legacyHttp = m['legacy_http'] == true;
+    cursorApprovals = m['cursor_approvals'] == true;
+    allowInstructions = m['allow_instructions'] == true;
+  }
+
+  Future<void> _writeSetting(String key, Object value) async {
+    final m = _readSettings()..[key] = value;
+    await File(settingsFile).writeAsString(jsonEncode(m));
+    await Process.run('chmod', ['600', settingsFile]);
+  }
+
   /// "Permitir desbloqueio pelo celular" (padrão: desligado).
   Future<void> setAllowUnlock(bool on) async {
-    final m = _readSettings()..['allow_unlock'] = on;
-    await File(settingsFile).writeAsString(jsonEncode(m));
+    await _writeSetting('allow_unlock', on);
     allowUnlock = on;
+    notifyListeners();
+  }
+
+  Future<void> setCursorApprovals(bool on) async {
+    await _writeSetting('cursor_approvals', on);
+    cursorApprovals = on;
+    notifyListeners();
+  }
+
+  Future<void> setAllowInstructions(bool on) async {
+    await _writeSetting('allow_instructions', on);
+    allowInstructions = on;
+    notifyListeners();
+  }
+
+  /// "Modo HTTP legado" (sem criptografia). Exige reiniciar o agente.
+  Future<void> setLegacyHttp(bool on) async {
+    await _writeSetting('legacy_http', on);
+    legacyHttp = on;
+    notifyListeners();
+    if (running) {
+      await stopAgent();
+      await startAgent();
+    }
+  }
+
+  // ---- integração com o Cursor (hooks) ----
+  String? _hookScript() {
+    final agent = _findAgent();
+    if (agent == null) return null;
+    final p = '${File(agent).parent.path}/tapkey_cursor_hook.py';
+    return File(p).existsSync() ? p : null;
+  }
+
+  Future<ProcessResult?> _hookCmd(String cmd) async {
+    final p = _hookScript();
+    if (p == null) return null;
+    return Process.run('/usr/bin/python3', [p, cmd]);
+  }
+
+  Future<void> refreshHooksStatus() async {
+    try {
+      final r = await _hookCmd('status');
+      if (r != null && r.exitCode == 0) {
+        cursorHooksInstalled = (jsonDecode(r.stdout as String) as Map)['installed'] == true;
+      }
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  /// Diff do que será acrescentado a ~/.cursor/hooks.json (nada é gravado).
+  Future<String> cursorDiff() async {
+    final r = await _hookCmd('diff');
+    if (r == null) return 'tapkey_cursor_hook.py não encontrado.';
+    return (r.stdout as String).trim().isEmpty ? (r.stderr as String) : r.stdout as String;
+  }
+
+  /// Instala/remove os hooks. Só é chamado depois que o usuário confirma o diff.
+  Future<bool> setCursorIntegration(bool on) async {
+    final r = await _hookCmd(on ? 'install' : 'uninstall');
+    if (r == null) {
+      cursorMsg = 'tapkey_cursor_hook.py não encontrado.';
+      notifyListeners();
+      return false;
+    }
+    cursorMsg = (r.stdout as String).trim();
+    final ok = r.exitCode == 0;
+    if (ok) await _writeSetting('cursor_integration', on);
+    await refreshHooksStatus();
+    return ok;
+  }
+
+  /// Revoga todos os celulares: novo token + novo certificado (novo fingerprint).
+  Future<void> revokeAll() async {
+    final dir = Directory('$configDir/tls');
+    if (dir.existsSync()) await dir.delete(recursive: true);
+    fingerprint = '';
+    await regenerateToken(restart: false);
+    if (running) {
+      await stopAgent();
+      await startAgent();
+    }
     notifyListeners();
   }
 
@@ -141,14 +254,18 @@ class AgentService extends ChangeNotifier {
     return '127.0.0.1';
   }
 
+  /// Pergunta ao listener de loopback do agente (HTTP simples, só 127.0.0.1).
   Future<bool> _ping() async {
     final c = HttpClient()..connectionTimeout = const Duration(seconds: 1);
     try {
-      final req = await c.getUrl(Uri.parse('http://127.0.0.1:$port/ping'));
-      req.headers.set('X-Token', token);
+      final req = await c.getUrl(Uri.parse('http://127.0.0.1:$hookPort/status'));
       final res = await req.close().timeout(const Duration(seconds: 2));
-      await res.drain();
-      return res.statusCode == 200;
+      final body = await res.transform(utf8.decoder).join();
+      if (res.statusCode != 200) return false;
+      final j = jsonDecode(body) as Map<String, dynamic>;
+      tls = j['tls'] == true;
+      fingerprint = (j['fp'] ?? '') as String;
+      return true;
     } catch (_) {
       return false;
     } finally {
@@ -159,6 +276,7 @@ class AgentService extends ChangeNotifier {
   Future<void> refresh() async {
     final ip = await _detectLanIp();
     final up = await _ping();
+    _loadSettings();
     var list = <ClientInfo>[];
     var launches = 0;
     var evs = <EventInfo>[];

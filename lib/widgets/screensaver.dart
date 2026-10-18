@@ -46,6 +46,7 @@ class _AppOverlaysState extends State<AppOverlays> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState s) {
     _foreground = s == AppLifecycleState.resumed;
+    widget.state.cursor.setForeground(_foreground);
     if (_foreground) _last = DateTime.now();
   }
 

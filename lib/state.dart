@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'config.dart';
+import 'cursor.dart';
 
 class AppItem {
   final String id;
@@ -15,10 +16,10 @@ class AppItem {
   const AppItem({required this.id, required this.name, this.icon = ''});
 
   factory AppItem.fromJson(Map<String, dynamic> j) => AppItem(
-        id: j['id'] as String,
-        name: j['name'] as String,
-        icon: (j['icon'] ?? '') as String,
-      );
+    id: j['id'] as String,
+    name: j['name'] as String,
+    icon: (j['icon'] ?? '') as String,
+  );
 
   Map<String, dynamic> toJson() => {'id': id, 'name': name, 'icon': icon};
 }
@@ -28,17 +29,24 @@ class AppState extends ChangeNotifier {
   String host = kDefaultHost;
   int port = kDefaultPort;
   String token = kDefaultToken;
+
+  /// Fingerprint SHA-256 (hex) do certificado do notebook. Vazio = HTTP legado (sem TLS).
+  String fp = kDefaultFp;
+  String notebookName = '';
+  late final CursorService cursor = CursorService(this);
   List<AppItem> favorites = [];
   bool connected = false;
   bool loaded = false;
   int screensaverSeconds = 60; // 0 = desligado
   bool locked = false;
   bool unlockAllowed = false;
+
   /// Chamado quando a conexão muda (após a inicialização).
   void Function(bool connected)? onConnectionChanged;
   Timer? _timer;
 
-  String get baseUrl => 'http://$host:$port';
+  bool get secure => fp.isNotEmpty;
+  String get baseUrl => '${secure ? 'https' : 'http'}://$host:$port';
   Map<String, String> get headers => {'X-Token': token};
 
   Future<void> init() async {
@@ -46,6 +54,8 @@ class AppState extends ChangeNotifier {
     host = _prefs.getString('host') ?? kDefaultHost;
     port = _prefs.getInt('port') ?? kDefaultPort;
     token = _prefs.getString('token') ?? kDefaultToken;
+    fp = _prefs.getString('fp') ?? kDefaultFp;
+    notebookName = _prefs.getString('name') ?? '';
     screensaverSeconds = _prefs.getInt('screensaver') ?? 60;
     final raw = _prefs.getString('favorites');
     if (raw != null) {
@@ -58,7 +68,10 @@ class AppState extends ChangeNotifier {
     loaded = true;
     notifyListeners();
     checkConnection();
-    _timer = Timer.periodic(const Duration(seconds: 5), (_) => checkConnection());
+    _timer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => checkConnection(),
+    );
   }
 
   @override
@@ -67,13 +80,25 @@ class AppState extends ChangeNotifier {
     super.dispose();
   }
 
-  Future<void> saveSettings(String h, int p, String t) async {
+  Future<void> saveSettings(
+    String h,
+    int p,
+    String t, {
+    String? fingerprint,
+    String? name,
+  }) async {
     host = h.trim();
     port = p;
     token = t.trim();
+    if (fingerprint != null) {
+      fp = fingerprint.trim().toLowerCase().replaceAll(':', '');
+    }
+    if (name != null) notebookName = name;
     await _prefs.setString('host', host);
     await _prefs.setInt('port', port);
     await _prefs.setString('token', token);
+    await _prefs.setString('fp', fp);
+    await _prefs.setString('name', notebookName);
     notifyListeners();
     await checkConnection();
   }
@@ -120,23 +145,77 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<(bool, String)> _post(String path, Map<String, dynamic> body) async {
+  /// POST genérico: devolve (status HTTP, corpo JSON). status 0 = sem conexão.
+  Future<(int, Map<String, dynamic>)> postJson(
+    String path,
+    Map<String, dynamic> body, {
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
     try {
       final r = await http
-          .post(Uri.parse('$baseUrl$path'),
-              headers: {...headers, 'Content-Type': 'application/json'}, body: jsonEncode(body))
+          .post(
+            Uri.parse('$baseUrl$path'),
+            headers: {...headers, 'Content-Type': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(timeout);
+      var j = <String, dynamic>{};
+      try {
+        j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+      } catch (_) {}
+      return (r.statusCode, j);
+    } catch (_) {
+      return (
+        0,
+        <String, dynamic>{
+          'error': 'Notebook desconectado. Verifique o agente e o Wi‑Fi.',
+        },
+      );
+    }
+  }
+
+  Future<(int, Map<String, dynamic>)> getJson(String path) async {
+    try {
+      final r = await http
+          .get(Uri.parse('$baseUrl$path'), headers: headers)
+          .timeout(const Duration(seconds: 6));
+      var j = <String, dynamic>{};
+      try {
+        j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+      } catch (_) {}
+      return (r.statusCode, j);
+    } catch (_) {
+      return (0, <String, dynamic>{'error': 'Notebook desconectado.'});
+    }
+  }
+
+  Future<(bool, String)> post(String path, Map<String, dynamic> body) async {
+    try {
+      final r = await http
+          .post(
+            Uri.parse('$baseUrl$path'),
+            headers: {...headers, 'Content-Type': 'application/json'},
+            body: jsonEncode(body),
+          )
           .timeout(const Duration(seconds: 12));
       final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
-      if (r.statusCode == 200) return (true, (j['message'] ?? 'Pronto') as String);
-      if (r.statusCode == 401) return (false, 'Token inválido. Verifique em Configurações.');
-      return (false, (j['error'] ?? j['message'] ?? 'Erro ${r.statusCode}') as String);
+      if (r.statusCode == 200) {
+        return (true, (j['message'] ?? 'Pronto') as String);
+      }
+      if (r.statusCode == 401) {
+        return (false, 'Token inválido. Verifique em Configurações.');
+      }
+      return (
+        false,
+        (j['error'] ?? j['message'] ?? 'Erro ${r.statusCode}') as String,
+      );
     } catch (_) {
       return (false, 'Notebook desconectado. Verifique o agente e o Wi‑Fi.');
     }
   }
 
   Future<(bool, String)> lockNotebook() async {
-    final res = await _post('/lock', {});
+    final res = await post('/lock', {});
     await refreshSession();
     return res;
   }
@@ -147,10 +226,16 @@ class AppState extends ChangeNotifier {
       final r = await http
           .get(Uri.parse('$baseUrl/challenge'), headers: headers)
           .timeout(const Duration(seconds: 5));
-      if (r.statusCode != 200) return (false, 'Não consegui obter o desafio de segurança.');
-      final nonce = (jsonDecode(r.body) as Map<String, dynamic>)['nonce'] as String;
-      final proof = Hmac(sha256, utf8.encode(token)).convert(utf8.encode(nonce)).toString();
-      final res = await _post('/unlock', {'nonce': nonce, 'proof': proof});
+      if (r.statusCode != 200) {
+        return (false, 'Não consegui obter o desafio de segurança.');
+      }
+      final nonce =
+          (jsonDecode(r.body) as Map<String, dynamic>)['nonce'] as String;
+      final proof = Hmac(
+        sha256,
+        utf8.encode(token),
+      ).convert(utf8.encode(nonce)).toString();
+      final res = await post('/unlock', {'nonce': nonce, 'proof': proof});
       await refreshSession();
       return res;
     } catch (_) {
@@ -160,7 +245,9 @@ class AppState extends ChangeNotifier {
 
   Future<void> _saveFavs() async {
     await _prefs.setString(
-        'favorites', jsonEncode(favorites.map((e) => e.toJson()).toList()));
+      'favorites',
+      jsonEncode(favorites.map((e) => e.toJson()).toList()),
+    );
     notifyListeners();
   }
 
@@ -197,9 +284,11 @@ class AppState extends ChangeNotifier {
   Future<(bool, String)> launch(AppItem a) async {
     try {
       final r = await http
-          .post(Uri.parse('$baseUrl/launch'),
-              headers: {...headers, 'Content-Type': 'application/json'},
-              body: jsonEncode({'id': a.id}))
+          .post(
+            Uri.parse('$baseUrl/launch'),
+            headers: {...headers, 'Content-Type': 'application/json'},
+            body: jsonEncode({'id': a.id}),
+          )
           .timeout(const Duration(seconds: 5));
       if (r.statusCode == 200) {
         if (!connected) {
@@ -208,7 +297,9 @@ class AppState extends ChangeNotifier {
         }
         return (true, 'Abrindo ${a.name} no notebook…');
       }
-      if (r.statusCode == 401) return (false, 'Token inválido. Verifique em Configurações.');
+      if (r.statusCode == 401) {
+        return (false, 'Token inválido. Verifique em Configurações.');
+      }
       return (false, 'Não consegui abrir ${a.name}.');
     } catch (_) {
       connected = false;
@@ -224,6 +315,8 @@ class AppState extends ChangeNotifier {
     if (r.statusCode == 401) throw Exception('Token inválido');
     if (r.statusCode != 200) throw Exception('Erro ${r.statusCode}');
     final list = jsonDecode(utf8.decode(r.bodyBytes)) as List;
-    return list.map((e) => AppItem.fromJson(e as Map<String, dynamic>)).toList();
+    return list
+        .map((e) => AppItem.fromJson(e as Map<String, dynamic>))
+        .toList();
   }
 }

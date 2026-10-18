@@ -6,7 +6,7 @@ import 'package:flutter/physics.dart';
 import '../theme.dart';
 import 'mascot.dart';
 
-enum IslandKind { info, success, error, lock }
+enum IslandKind { info, success, error, lock, cursor, warn }
 
 /// Controla a "ilha": pílula no topo da tela que mostra eventos e feedback.
 class IslandController extends ChangeNotifier {
@@ -15,7 +15,11 @@ class IslandController extends ChangeNotifier {
   Duration duration = const Duration(milliseconds: 2400);
   int seq = 0;
 
-  void show(String text, {IslandKind kind = IslandKind.info, Duration? duration}) {
+  void show(
+    String text, {
+    IslandKind kind = IslandKind.info,
+    Duration? duration,
+  }) {
     this.text = text;
     this.kind = kind;
     if (duration != null) this.duration = duration;
@@ -35,8 +39,12 @@ class IslandHost extends StatefulWidget {
   State<IslandHost> createState() => _IslandHostState();
 }
 
-class _IslandHostState extends State<IslandHost> with SingleTickerProviderStateMixin {
-  late final AnimationController _ctl = AnimationController.unbounded(vsync: this, value: 0);
+class _IslandHostState extends State<IslandHost>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctl = AnimationController.unbounded(
+    vsync: this,
+    value: 0,
+  );
   final MascotController _mc = MascotController();
   Timer? _timer;
   int _shownSeq = 0;
@@ -76,6 +84,10 @@ class _IslandHostState extends State<IslandHost> with SingleTickerProviderStateM
           _mc.error();
         case IslandKind.lock:
           _mc.wink();
+        case IslandKind.cursor:
+          _mc.happy();
+        case IslandKind.warn:
+          _mc.surprised();
         case IslandKind.info:
           break;
       }
@@ -85,13 +97,19 @@ class _IslandHostState extends State<IslandHost> with SingleTickerProviderStateM
 
   void _close() {
     if (!mounted) return;
-    _ctl.animateTo(0, duration: const Duration(milliseconds: 340), curve: Curves.easeInOutCubic);
+    _ctl.animateTo(
+      0,
+      duration: const Duration(milliseconds: 340),
+      curve: Curves.easeInOutCubic,
+    );
   }
 
   IconData? get _icon => switch (island.kind) {
-        IslandKind.lock => Icons.lock_outline,
-        _ => null,
-      };
+    IslandKind.lock => Icons.lock_outline,
+    IslandKind.cursor => Icons.terminal_rounded,
+    IslandKind.warn => Icons.help_outline_rounded,
+    _ => null,
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -120,44 +138,61 @@ class _IslandHostState extends State<IslandHost> with SingleTickerProviderStateM
                       alignment: Alignment.topCenter,
                       child: Container(
                         key: ValueKey(_shownSeq),
-                        constraints: const BoxConstraints(minHeight: 44, maxWidth: 340),
+                        constraints: const BoxConstraints(
+                          minHeight: 44,
+                          maxWidth: 340,
+                        ),
                         padding: const EdgeInsets.fromLTRB(8, 4, 18, 4),
                         decoration: BoxDecoration(
                           color: const Color(0xFF121214),
                           borderRadius: BorderRadius.circular(26),
-                          border: Border.all(color: err ? kErr.withValues(alpha: .55) : kBorder),
+                          border: Border.all(
+                            color: err ? kErr.withValues(alpha: .55) : kBorder,
+                          ),
                           boxShadow: [
-                            BoxShadow(color: Colors.black.withValues(alpha: .6), blurRadius: 18, offset: const Offset(0, 6)),
-                            BoxShadow(color: kAccent.withValues(alpha: .06), blurRadius: 14),
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: .6),
+                              blurRadius: 18,
+                              offset: const Offset(0, 6),
+                            ),
+                            BoxShadow(
+                              color: kAccent.withValues(alpha: .06),
+                              blurRadius: 14,
+                            ),
                           ],
                         ),
-                        child: Row(mainAxisSize: MainAxisSize.min, children: [
-                          Mascot(
-                            controller: _mc,
-                            size: 34,
-                            interactive: false,
-                            alwaysOn: true,
-                            connected: !err,
-                          ),
-                          const SizedBox(width: 6),
-                          if (_icon != null) ...[
-                            Icon(_icon, size: 16, color: kAccent),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Mascot(
+                              controller: _mc,
+                              size: 34,
+                              interactive: false,
+                              alwaysOn: true,
+                              connected: !err,
+                            ),
                             const SizedBox(width: 6),
-                          ],
-                          Flexible(
-                            child: Text(
-                              island.text,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 13.5,
-                                fontWeight: FontWeight.w600,
-                                color: err ? const Color(0xFFFFB4B4) : Colors.white,
-                                decoration: TextDecoration.none,
+                            if (_icon != null) ...[
+                              Icon(_icon, size: 16, color: kAccent),
+                              const SizedBox(width: 6),
+                            ],
+                            Flexible(
+                              child: Text(
+                                island.text,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: err
+                                      ? const Color(0xFFFFB4B4)
+                                      : Colors.white,
+                                  decoration: TextDecoration.none,
+                                ),
                               ),
                             ),
-                          ),
-                        ]),
+                          ],
+                        ),
                       ),
                     ),
                   ),

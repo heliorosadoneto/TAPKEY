@@ -42,6 +42,135 @@ class _HomePageState extends State<HomePage> {
     ..hideCurrentSnackBar()
     ..showSnackBar(SnackBar(content: Text(m), duration: const Duration(seconds: 2)));
 
+  Widget _sw(String title, String sub, bool v, ValueChanged<bool>? on, {bool danger = false}) => SwitchListTile(
+        dense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+        title: Text(title, style: TextStyle(fontSize: 13, color: danger && v ? kErr : null)),
+        subtitle: Text(sub, style: const TextStyle(fontSize: 11, color: kMuted)),
+        value: v,
+        onChanged: on,
+      );
+
+  Widget _security() {
+    final secure = a.tls;
+    return Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 4),
+        childrenPadding: EdgeInsets.zero,
+        dense: true,
+        leading: Icon(secure ? Icons.lock_outline : Icons.warning_amber_rounded,
+            size: 18, color: secure ? kOk : kErr),
+        title: const Text('Segurança e Cursor', style: TextStyle(fontSize: 13)),
+        subtitle: Text(
+            secure ? 'TLS com certificado fixado no celular' : 'HTTP legado: sem criptografia',
+            style: TextStyle(fontSize: 11, color: secure ? kMuted : kErr)),
+        children: [
+          _sw('Permitir desbloqueio pelo celular', 'Token, desafio de uso único e biometria/PIN', a.allowUnlock,
+              (v) => a.setAllowUnlock(v)),
+          _sw('Integrar com o Cursor', 'Instala hooks em ~/.cursor/hooks.json (mostra o diff antes)',
+              a.cursorHooksInstalled, (v) => _toggleCursor(v)),
+          _sw('Aprovar comandos pelo celular', 'Shell/MCP esperam sua decisão (60 s, depois pergunta no Cursor)',
+              a.cursorApprovals, a.cursorHooksInstalled ? (v) => a.setCursorApprovals(v) : null),
+          _sw('Permitir enviar instruções do celular', 'Próxima instrução no mesmo chat e Cursor CLI (pastas já vistas)',
+              a.allowInstructions, a.cursorHooksInstalled ? (v) => a.setAllowInstructions(v) : null),
+          _sw('Modo HTTP legado', 'Desliga a criptografia (só em rede confiável)', a.legacyHttp,
+              (v) => _toggleLegacy(v), danger: true),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _revoke,
+              icon: const Icon(Icons.shield_outlined, size: 16),
+              label: const Text('Revogar todos os celulares', style: TextStyle(fontSize: 12)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _toggleCursor(bool on) async {
+    if (on) {
+      final diff = await a.cursorDiff();
+      if (!mounted) return;
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: kCard,
+          title: const Text('Integrar com o Cursor?', style: TextStyle(fontSize: 16)),
+          content: SizedBox(
+            width: 330,
+            height: 300,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text(
+                  'Será feito um backup do hooks.json e acrescentadas entradas do TAPKEY (marcadas, removíveis). Suas entradas atuais não mudam.',
+                  style: TextStyle(fontSize: 12, color: kMuted)),
+              const SizedBox(height: 8),
+              Expanded(
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(color: const Color(0xFF0B0B0C), borderRadius: BorderRadius.circular(8)),
+                  child: SingleChildScrollView(
+                    child: SelectableText(diff, style: const TextStyle(fontFamily: 'monospace', fontSize: 10.5)),
+                  ),
+                ),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancelar')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Instalar')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    final done = await a.setCursorIntegration(on);
+    _toast(done ? (on ? 'Integração com o Cursor ativada' : 'Integração removida') : a.cursorMsg);
+  }
+
+  Future<void> _toggleLegacy(bool on) async {
+    if (on) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: kCard,
+          title: const Text('Ativar modo HTTP legado?', style: TextStyle(fontSize: 16)),
+          content: const Text(
+              'O tráfego (inclusive o token) deixa de ser criptografado e o celular não verifica o notebook. Use só em uma rede em que você confia. O celular precisa escanear o QR de novo.',
+              style: TextStyle(fontSize: 13)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancelar')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Ativar')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    await a.setLegacyHttp(on);
+  }
+
+  Future<void> _revoke() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kCard,
+        title: const Text('Revogar todos os celulares?', style: TextStyle(fontSize: 16)),
+        content: const Text('Gera novo token e novo certificado. Todos os celulares precisam escanear o QR de novo.',
+            style: TextStyle(fontSize: 13)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Revogar')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await a.revokeAll();
+      _toast('Acesso revogado. Escaneie o novo QR.');
+    }
+  }
+
   Future<void> _regen() async {
     final ok = await showDialog<bool>(
       context: context,
@@ -111,15 +240,7 @@ class _HomePageState extends State<HomePage> {
               value: a.autostart,
               onChanged: (v) => a.setAutostart(v),
             ),
-            SwitchListTile(
-              dense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-              title: const Text('Permitir desbloqueio pelo celular', style: TextStyle(fontSize: 13)),
-              subtitle: const Text('Exige token, desafio de uso único e biometria/PIN no celular',
-                  style: TextStyle(fontSize: 11, color: kMuted)),
-              value: a.allowUnlock,
-              onChanged: (v) => a.setAllowUnlock(v),
-            ),
+            _security(),
           ]
               .animate(interval: 60.ms)
               .fadeIn(duration: 350.ms)

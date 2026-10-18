@@ -4,12 +4,20 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import '../theme.dart';
 
 /// Dados de pareamento lidos do QR do TAPKEY Desktop:
-/// tapkey://pair?host=IP&port=8765&token=TOKEN
+/// tapkey://pair?host=IP&port=8765&fp=SHA256&token=TOKEN&name=NOTEBOOK
 class PairData {
   final String host;
   final int port;
   final String token;
-  const PairData(this.host, this.port, this.token);
+  final String fp; // SHA-256 do certificado (vazio = legado/HTTP)
+  final String name;
+  const PairData(
+    this.host,
+    this.port,
+    this.token, {
+    this.fp = '',
+    this.name = '',
+  });
 
   static PairData? parse(String raw) {
     final u = Uri.tryParse(raw.trim());
@@ -17,10 +25,22 @@ class PairData {
     final host = u.queryParameters['host'];
     final port = int.tryParse(u.queryParameters['port'] ?? '');
     final token = u.queryParameters['token'];
-    if (host == null || host.isEmpty || port == null || token == null || token.isEmpty) {
+    if (host == null ||
+        host.isEmpty ||
+        port == null ||
+        token == null ||
+        token.isEmpty) {
       return null;
     }
-    return PairData(host, port, token);
+    final fp = (u.queryParameters['fp'] ?? '').toLowerCase();
+    if (fp.isNotEmpty && !RegExp(r'^[0-9a-f]{64}$').hasMatch(fp)) return null;
+    return PairData(
+      host,
+      port,
+      token,
+      fp: fp,
+      name: u.queryParameters['name'] ?? '',
+    );
   }
 }
 
@@ -65,42 +85,44 @@ class _ScanScreenState extends State<ScanScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(title: const Text('Escanear QR')),
-      body: Stack(children: [
-        MobileScanner(
-          controller: _controller,
-          onDetect: _onDetect,
-          errorBuilder: (context, error) => Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text(
-                'Não foi possível abrir a câmera.\nPermita o acesso à câmera nas configurações do Android.',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: kMuted),
+      body: Stack(
+        children: [
+          MobileScanner(
+            controller: _controller,
+            onDetect: _onDetect,
+            errorBuilder: (context, error) => Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  'Não foi possível abrir a câmera.\nPermita o acesso à câmera nas configurações do Android.',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: kMuted),
+                ),
               ),
             ),
           ),
-        ),
-        Center(
-          child: Container(
-            width: 240,
-            height: 240,
-            decoration: BoxDecoration(
-              border: Border.all(color: kAccent, width: 2),
-              borderRadius: BorderRadius.circular(24),
+          Center(
+            child: Container(
+              width: 240,
+              height: 240,
+              decoration: BoxDecoration(
+                border: Border.all(color: kAccent, width: 2),
+                borderRadius: BorderRadius.circular(24),
+              ),
             ),
           ),
-        ),
-        Positioned(
-          left: 0,
-          right: 0,
-          bottom: 32,
-          child: Text(
-            _hint ?? 'Aponte para o QR exibido no TAPKEY Desktop',
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 14, color: kAccent),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 32,
+            child: Text(
+              _hint ?? 'Aponte para o QR exibido no TAPKEY Desktop',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 14, color: kAccent),
+            ),
           ),
-        ),
-      ]),
+        ],
+      ),
     );
   }
 }
