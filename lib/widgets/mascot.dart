@@ -28,9 +28,10 @@ enum TapiEmote {
   error,
   finished,
   sleeping,
+  sleepy,
 }
 
-enum _CmdType { emote, squish, jump, spin, shake, wake, pop, tap, working, sleeping }
+enum _CmdType { emote, squish, jump, spin, shake, wake, pop, tap, working, sleeping, hop, look, stretch, curious, sleepy }
 
 class _Cmd {
   final _CmdType type;
@@ -46,8 +47,17 @@ class MascotController {
   final List<void Function(_Cmd)> _cmdListeners = [];
   final List<VoidCallback> _wakers = [];
 
+  final List<MascotController> _links = [];
+
+  /// Repassa comandos e toques deste controlador para [other] (ex.: o Tapi grande da Home).
+  void link(MascotController other) => _links.add(other);
+  void unlink(MascotController other) => _links.remove(other);
+
   void setPointer(Offset p) {
     pointer = p;
+    for (final l in _links) {
+      l.setPointer(p);
+    }
     for (final w in List.of(_wakers)) {
       w();
     }
@@ -56,6 +66,9 @@ class MascotController {
   void _send(_Cmd c) {
     for (final l in List.of(_cmdListeners)) {
       l(c);
+    }
+    for (final l in _links) {
+      l._send(c);
     }
   }
 
@@ -76,6 +89,21 @@ class MascotController {
       _send(_Cmd(_CmdType.emote, emote: e, seconds: seconds));
   void working(bool on) => _send(_Cmd(_CmdType.working, flag: on));
   void sleeping(bool on) => _send(_Cmd(_CmdType.sleeping, flag: on));
+
+  /// Pulinho curto (sem giro).
+  void hop() => _send(const _Cmd(_CmdType.hop));
+
+  /// Olha de um lado para o outro.
+  void lookAround() => _send(const _Cmd(_CmdType.look));
+
+  /// Espreguiça.
+  void stretch() => _send(const _Cmd(_CmdType.stretch));
+
+  /// Curioso: arregala os olhos e inclina a cabeça.
+  void curious() => _send(const _Cmd(_CmdType.curious));
+
+  /// Sonolento (olhos meio fechados), antes do protetor de tela.
+  void sleepy(bool on) => _send(_Cmd(_CmdType.sleepy, flag: on));
 
   /// Acorda esticando e acenando.
   void wake() => _send(const _Cmd(_CmdType.wake));
@@ -165,6 +193,23 @@ _Fx _fxWake(double t0) => _Fx(t0, 1.1, const [
       _Trk(_Prop.rot, [_K(0, 0), _K(.4, 0), _K(.5, .12, Curves.easeInOutCubic), _K(.6, -.12, Curves.easeInOutCubic), _K(.7, .1, Curves.easeInOutCubic), _K(.8, -.08, Curves.easeInOutCubic), _K(1.0, 0, Curves.easeOutCubic)]),
     ]);
 
+_Fx _fxHop(double t0) => _Fx(t0, 0.7, const [
+      _Trk(_Prop.sy, [_K(0, 1), _K(.12, .86, Curves.easeOutCubic), _K(.28, 1.12, Curves.easeOutBack), _K(.55, 1.02, Curves.easeInOutCubic), _K(.66, .9, Curves.easeInCubic), _K(.8, 1.04, Curves.easeOutBack), _K(.95, 1, Curves.easeOutCubic)]),
+      _Trk(_Prop.sx, [_K(0, 1), _K(.12, 1.1, Curves.easeOutCubic), _K(.28, .93, Curves.easeOutBack), _K(.55, .99, Curves.easeInOutCubic), _K(.66, 1.1, Curves.easeInCubic), _K(.8, .98, Curves.easeOutBack), _K(.95, 1, Curves.easeOutCubic)]),
+      _Trk(_Prop.dy, [_K(0, 0), _K(.12, 0), _K(.42, -.16, Curves.easeOutCubic), _K(.66, 0, Curves.easeInCubic), _K(.95, 0)]),
+    ]);
+
+_Fx _fxStretch(double t0) => _Fx(t0, 1.5, const [
+      _Trk(_Prop.sy, [_K(0, 1), _K(.4, 1.24, Curves.easeOutCubic), _K(.95, 1.2), _K(1.5, 1, Curves.easeOutBack)]),
+      _Trk(_Prop.sx, [_K(0, 1), _K(.4, .88, Curves.easeOutCubic), _K(.95, .9), _K(1.5, 1, Curves.easeOutBack)]),
+      _Trk(_Prop.rot, [_K(0, 0), _K(.5, .05, Curves.easeInOutCubic), _K(.9, -.05, Curves.easeInOutCubic), _K(1.5, 0, Curves.easeOutCubic)]),
+    ]);
+
+_Fx _fxTilt(double t0) => _Fx(t0, 1.0, const [
+      _Trk(_Prop.rot, [_K(0, 0), _K(.2, .2, Curves.easeOutBack), _K(.65, .2), _K(1.0, 0, Curves.easeInOutCubic)]),
+      _Trk(_Prop.sy, [_K(0, 1), _K(.2, 1.08, Curves.easeOutCubic), _K(1.0, 1, Curves.easeOutBack)]),
+    ]);
+
 _Fx _fxPop(double t0) => _Fx(t0, 0.9, const [
       _Trk(_Prop.dy, [_K(0, .75), _K(.45, -.07, Curves.easeOutCubic), _K(.9, 0, Curves.easeOutBack)]),
       _Trk(_Prop.sx, [_K(0, .7), _K(.45, 1.08, Curves.easeOutCubic), _K(.9, 1, Curves.easeOutBack)]),
@@ -178,6 +223,11 @@ _Fx _fxShake(double t0) => _Fx(t0, 0.6, const [
         _K(.38, .02, Curves.easeInOutCubic), _K(.5, -.01, Curves.easeInOutCubic), _K(.6, 0),
       ]),
     ]);
+
+class _LS {
+  final double t, x, y;
+  const _LS(this.t, this.x, this.y);
+}
 
 enum _PType { heart, star, z, spark }
 
@@ -213,6 +263,9 @@ class TapiEngine {
   bool sleeping = false;
   bool working = false;
   bool alwaysOn = false;
+  bool sleepy = false;
+  List<_LS> _lookScript = const [];
+  double _lookScriptEnd = 0;
 
   // estado
   TapiEmote _timed = TapiEmote.idle;
@@ -247,6 +300,7 @@ class TapiEngine {
   TapiEmote get effective {
     if (t < _timedUntil) return _timed;
     if (sleeping) return TapiEmote.sleeping;
+    if (sleepy && !working) return TapiEmote.sleepy;
     if (working) return TapiEmote.working;
     if (!connected) return TapiEmote.worried;
     return TapiEmote.idle;
@@ -286,6 +340,22 @@ class TapiEngine {
         working = c.flag;
       case _CmdType.sleeping:
         sleeping = c.flag;
+      case _CmdType.hop:
+        _fx.add(_fxHop(t));
+        _burst(_PType.spark, 2);
+      case _CmdType.look:
+        _lookScript = [
+          _LS(t + .0, -.9, .1), _LS(t + .55, .9, -.1), _LS(t + 1.1, -.5, -.6), _LS(t + 1.6, .1, .3), _LS(t + 2.1, 0, 0),
+        ];
+        _lookScriptEnd = t + 2.4;
+      case _CmdType.stretch:
+        _fx.add(_fxStretch(t));
+        _setTimed(TapiEmote.yawn, 1.6);
+      case _CmdType.curious:
+        _fx.add(_fxTilt(t));
+        _setTimed(TapiEmote.surprised, 1.0);
+      case _CmdType.sleepy:
+        sleepy = c.flag;
     }
   }
 
@@ -355,6 +425,8 @@ class TapiEngine {
         se = 1; sm = 1; gl = 1; lf = .7;
       case TapiEmote.sleeping:
         eo = 1; ar = -1; sm = .15; gl = .08;
+      case TapiEmote.sleepy:
+        eo = .4; sm = .1; gl = .12;
     }
     eyeOpen.target = eo; eyeScale.target = es; arc.target = ar; winkR.target = wk;
     heartEyes.target = he; starEyes.target = se; spiral.target = sp;
@@ -385,6 +457,16 @@ class TapiEngine {
       lx = math.sin(t * 3.2) * .8;
       ly = 0;
       glow.target = .65 + .35 * math.sin(t * 9);
+    }
+    if (t < _lookScriptEnd) {
+      _LS? cur;
+      for (final k in _lookScript) {
+        if (k.t <= t) cur = k;
+      }
+      if (cur != null) {
+        lx = cur.x;
+        ly = cur.y;
+      }
     }
     if (e == TapiEmote.sleeping || e == TapiEmote.dizzy || e == TapiEmote.yawn) {
       lx = 0;
@@ -436,7 +518,7 @@ class TapiEngine {
       }
     }
     // respiração
-    final br = math.sin(t * (e == TapiEmote.sleeping ? 1.1 : 2.1)) * (e == TapiEmote.sleeping ? .035 : .02);
+    final br = math.sin(t * (e == TapiEmote.sleeping || e == TapiEmote.sleepy ? 1.1 : 2.1)) * (e == TapiEmote.sleeping || e == TapiEmote.sleepy ? .035 : .02);
     sy *= 1 + br;
     sx *= 1 - br * .6;
     // tontura: balanço + rolagem
@@ -502,7 +584,7 @@ class TapiEngine {
       _setTimed(TapiEmote.yawn, 2.4);
     }
     final busy = _fx.isNotEmpty || t < _timedUntil || _parts.isNotEmpty;
-    rest = !alwaysOn && !sleeping && !working && !busy && idleFor > 45;
+    rest = !alwaysOn && !sleeping && !sleepy && !working && !busy && idleFor > 45;
   }
 
   double _blink = 0;

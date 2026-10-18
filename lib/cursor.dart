@@ -80,6 +80,9 @@ class CursorService extends ChangeNotifier {
   http.Client? _client;
   bool _foreground = true;
   bool _wanted = false;
+
+  /// Usado por testes de widget: impede o laço SSE (timers pendentes).
+  bool disabled = false;
   int _gen = 0;
   final Set<String> _seenApprovals = {};
 
@@ -88,7 +91,7 @@ class CursorService extends ChangeNotifier {
       sessions.any((s) => s.state == 'working' || s.state == 'thinking');
 
   void _appChanged() {
-    final want = app.connected && _foreground;
+    final want = !disabled && app.connected && _foreground;
     if (want && !_wanted) {
       start();
     } else if (!want && _wanted) {

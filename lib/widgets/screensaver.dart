@@ -8,7 +8,11 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../state.dart';
 import 'island.dart';
+import 'living_background.dart';
 import 'mascot.dart';
+
+/// Última interação do usuário (usado pelo Tapi para ficar sonolento antes do protetor de tela).
+DateTime lastAppActivity = DateTime.now();
 
 /// Envolve o app: ilha no topo + protetor de tela após inatividade.
 class AppOverlays extends StatefulWidget {
@@ -52,6 +56,7 @@ class _AppOverlaysState extends State<AppOverlays> with WidgetsBindingObserver {
 
   void _poke() {
     _last = DateTime.now();
+    lastAppActivity = _last;
   }
 
   void _check() {
@@ -65,6 +70,7 @@ class _AppOverlaysState extends State<AppOverlays> with WidgetsBindingObserver {
       _active = true;
       _visible = false;
     });
+    LivingBackground.paused.value = true;
     WakelockPlus.enable().catchError((_) {});
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     // começa a aparecer no próximo frame (fade in)
@@ -74,8 +80,10 @@ class _AppOverlaysState extends State<AppOverlays> with WidgetsBindingObserver {
   }
 
   Future<void> _dismiss() async {
+    HapticFeedback.lightImpact();
     if (!_active || !_visible) return;
     _last = DateTime.now();
+    lastAppActivity = _last;
     _ssCtl.wake(); // Tapi acorda esticando e acenando
     setState(() => _visible = false);
     WakelockPlus.disable().catchError((_) {});
@@ -85,6 +93,7 @@ class _AppOverlaysState extends State<AppOverlays> with WidgetsBindingObserver {
       landscape ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
     );
     await Future.delayed(const Duration(milliseconds: 520));
+    LivingBackground.paused.value = false;
     if (mounted) setState(() => _active = false);
   }
 

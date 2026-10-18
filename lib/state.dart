@@ -273,6 +273,17 @@ class AppState extends ChangeNotifier {
     await _saveFavs();
   }
 
+  /// Reordena os favoritos conforme [ids] (usado pelo arrastar-e-soltar).
+  Future<void> setOrder(List<String> ids) async {
+    final byId = {for (final a in favorites) a.id: a};
+    final next = [for (final id in ids) if (byId[id] != null) byId[id]!];
+    for (final a in favorites) {
+      if (!ids.contains(a.id)) next.add(a);
+    }
+    favorites = next;
+    await _saveFavs();
+  }
+
   Future<void> moveToFront(String id) async {
     final i = favorites.indexWhere((e) => e.id == id);
     if (i <= 0) return;

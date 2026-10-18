@@ -8,7 +8,7 @@ cd ~/projetos/meu_notebook/agent
 python3 agent.py
 ```
 Na primeira execução é gerado um token em `~/.config/tapkey/token`.
-O terminal mostra o endereço (ex.: `http://192.168.3.133:8765`) e o token — coloque os dois em
+O agente serve **HTTPS** com um certificado autoassinado gerado na primeira execução (`~/.config/tapkey/tls/`); o terminal mostra o endereço (ex.: `https://192.168.3.133:8765`), o *fingerprint* SHA-256 e o link de pareamento `tapkey://pair?...&fp=...`. Para HTTP legado (não recomendado): `{"legacy_http": true}` em `settings.json`. Coloque o endereço e o token — coloque os dois em
 **Configurações** no app do celular.
 
 Em segundo plano:
@@ -34,7 +34,7 @@ systemctl --user status meu-notebook-agent.service
 
 ## Segurança
 - Só abre aplicativos que estão na lista de `.desktop` escaneada; nunca comandos arbitrários.
-- Use apenas em rede Wi-Fi confiável; o tráfego é HTTP simples com token.
+- TLS com certificado fixado pelo app (via QR). Use em rede Wi-Fi confiável.
 - Se usar firewall (ufw): `sudo ufw allow 8765/tcp`
 
 ## Bloquear / desbloquear
@@ -47,3 +47,14 @@ systemctl --user status meu-notebook-agent.service
 | `POST /unlock` | `{nonce, proof}` com `proof = HMAC-SHA256(token, nonce)`; `403` se desativado, `429` acima de 5/min por IP, `400` se o desafio for inválido |
 
 O desbloqueio fica desligado até `~/.config/tapkey/settings.json` ter `{"allow_unlock": true}` (o TAPKEY Desktop grava isso em "Permitir desbloqueio pelo celular"). Todo bloqueio/desbloqueio é registrado em `~/.config/tapkey/events.log` e em `clients.json` (campo `events`).
+
+## Integração com o Cursor (opcional)
+
+Arquivos: `cursor_bridge.py` (estado, aprovações, fila, CLI), `tapkey_cursor_hook.py` (relay dos hooks e instalador). Tudo desligado por padrão (`cursor_integration`, `cursor_approvals`, `allow_instructions` em `settings.json`, controlados pelo TAPKEY Desktop). Rotas: `GET /cursor/state`, `GET /cursor/events` (SSE), `POST /cursor/approval`, `/cursor/instruction`, `/cursor/instruction/cancel`, `/cursor/cli/cancel`, `/cursor/open`. O relay fala com `127.0.0.1:8766` (`POST /hook`, segredo em `~/.config/tapkey/hook_secret`).
+
+```bash
+python3 tapkey_cursor_hook.py diff --home /tmp/copia     # mostra o que mudaria
+python3 tapkey_cursor_hook.py install --home /tmp/copia  # instala (backup + mescla)
+python3 tapkey_cursor_hook.py uninstall --home /tmp/copia
+python3 -W ignore -m unittest discover -s tests          # testes
+```

@@ -65,6 +65,8 @@ void main() {
         AppItem(id: 'code', name: 'Code', icon: 'code'),
         AppItem(id: 'calc', name: 'Calculadora', icon: 'calculate'),
       ];
+    s.cursor.disabled = true;
+    s.cursor.stop();
     final k = GlobalKey();
     await t.pumpWidget(RepaintBoundary(key: k, child: TapkeyApp(state: s)));
     await adv(t, 600);

@@ -22,7 +22,14 @@ ThemeData buildTheme() {
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
-    scaffoldBackgroundColor: kBg,
+    // transparente: o fundo vivo (LivingBackground) aparece atrás de todas as telas
+    scaffoldBackgroundColor: Colors.transparent,
+    canvasColor: kBg,
+    pageTransitionsTheme: const PageTransitionsTheme(builders: {
+      TargetPlatform.android: SharedAxisTransitions(),
+      TargetPlatform.linux: SharedAxisTransitions(),
+      TargetPlatform.iOS: SharedAxisTransitions(),
+    }),
     appBarTheme: const AppBarTheme(
       backgroundColor: Colors.transparent,
       elevation: 0,
@@ -55,4 +62,45 @@ ThemeData buildTheme() {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
     ),
   );
+}
+
+
+/// Transição de página "eixo compartilhado" (X): a nova tela entra deslizando e
+/// aparecendo com mola; a anterior recua e some. Combina com fade-through.
+class SharedAxisTransitions extends PageTransitionsBuilder {
+  const SharedAxisTransitions();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    final inCurve = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
+    final fadeIn = CurvedAnimation(parent: animation, curve: const Interval(.12, 1, curve: Curves.easeOut));
+    final outCurve = CurvedAnimation(parent: secondaryAnimation, curve: Curves.easeInOutCubic);
+    return AnimatedBuilder(
+      animation: outCurve,
+      builder: (context, c) => Opacity(
+        opacity: 1 - .85 * outCurve.value,
+        child: Transform.translate(
+          offset: Offset(-34 * outCurve.value, 0),
+          child: Transform.scale(scale: 1 - .04 * outCurve.value, child: c),
+        ),
+      ),
+      child: FadeTransition(
+        opacity: fadeIn,
+        child: AnimatedBuilder(
+          animation: inCurve,
+          builder: (context, c) => Transform.translate(
+            offset: Offset(40 * (1 - inCurve.value), 0),
+            child: Transform.scale(scale: .96 + .04 * inCurve.value, child: c),
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
 }

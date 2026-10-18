@@ -17,10 +17,10 @@ void main(List<String> args) async {
   final minimized = args.contains('--minimized');
   await windowManager.ensureInitialized();
   const opts = WindowOptions(
-    size: Size(360, 590),
+    size: Size(380, 700),
     minimumSize: Size(340, 520),
     center: true,
-    maximumSize: Size(520, 760),
+    maximumSize: Size(560, 860),
     title: 'TAPKEY Desktop',
     backgroundColor: kBg,
   );

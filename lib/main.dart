@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 
 import 'pinning.dart';
 import 'screens/cursor_screen.dart';
@@ -12,6 +13,7 @@ import 'theme.dart';
 import 'widgets/approval_sheet.dart';
 import 'widgets/header.dart';
 import 'widgets/island.dart';
+import 'widgets/living_background.dart';
 import 'widgets/lock_sheet.dart';
 import 'widgets/screensaver.dart';
 import 'widgets/mascot.dart';
@@ -40,9 +42,15 @@ class TapkeyApp extends StatelessWidget {
       theme: buildTheme(),
       builder: (context, child) => Listener(
         behavior: HitTestBehavior.translucent,
-        onPointerDown: (e) => mascotController.setPointer(e.position),
+        onPointerDown: (e) {
+          mascotController.setPointer(e.position);
+          LivingBackground.ripple(e.position); // onda no fundo onde você toca
+        },
         onPointerMove: (e) => mascotController.setPointer(e.position),
-        child: AppOverlays(state: state, child: child!),
+        child: Stack(fit: StackFit.expand, children: [
+          const LivingBackground(),
+          AppOverlays(state: state, child: child!),
+        ]),
       ),
       home: Shell(state: state),
     );
@@ -59,6 +67,7 @@ class Shell extends StatefulWidget {
 
 class _ShellState extends State<Shell> {
   int _tab = 0;
+  int _dir = 1;
   Orientation? _lastOrientation;
 
   @override
@@ -92,6 +101,10 @@ class _ShellState extends State<Shell> {
           mascotController.wink();
       }
     };
+    // cumprimento ao abrir o app: a ilha "nasce" e o Tapi acena
+    Future.delayed(const Duration(milliseconds: 450), () {
+      if (mounted) island.show('Oi! O Tapi está pronto', kind: IslandKind.greet, duration: const Duration(milliseconds: 2200));
+    });
     widget.state.onConnectionChanged = (ok) {
       if (ok) {
         island.show('Notebook conectado', kind: IslandKind.success);
@@ -129,6 +142,17 @@ class _ShellState extends State<Shell> {
     (Icons.settings_outlined, Icons.settings, 'Configurações'),
   ];
 
+  void _go(int i) {
+    if (i == _tab) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _dir = i > _tab ? 1 : -1;
+      _tab = i;
+    });
+    if (i == 1) mascotController.curious();
+    if (i == 2) mascotController.wink();
+  }
+
   Widget _badge((IconData, IconData, String) d, Widget icon) {
     final n = widget.state.cursor.pendingCount;
     if (d.$3 != 'Cursor' || n == 0) return icon;
@@ -144,16 +168,30 @@ class _ShellState extends State<Shell> {
       CursorScreen(state: s),
       SettingsScreen(state: s),
     ];
+    // fade-through com eixo compartilhado: a nova aba entra pelo lado do sentido da troca
     final content = AnimatedSwitcher(
-      duration: const Duration(milliseconds: 350),
+      duration: const Duration(milliseconds: 420),
       switchInCurve: Curves.easeOutCubic,
-      transitionBuilder: (c, a) => FadeTransition(
-        opacity: a,
-        child: SlideTransition(
-          position: Tween(begin: const Offset(0, 0.03), end: Offset.zero).animate(a),
-          child: c,
-        ),
-      ),
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (c, a) {
+        final incoming = (c.key as ValueKey<int>).value == _tab;
+        final k = CurvedAnimation(parent: a, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
+        return FadeTransition(
+          opacity: CurvedAnimation(parent: a, curve: incoming ? const Interval(.25, 1) : const Interval(0, .6)),
+          child: AnimatedBuilder(
+            animation: k,
+            builder: (context, child) {
+              final p = incoming ? 1 - k.value : -(1 - k.value);
+              return Transform.translate(
+                offset: Offset(_dir * 46 * p, 0),
+                child: Transform.scale(scale: .965 + .035 * k.value, child: child),
+              );
+            },
+            child: c,
+          ),
+        );
+      },
+      layoutBuilder: (cur, prev) => Stack(fit: StackFit.expand, children: [...prev, ?cur]),
       child: KeyedSubtree(key: ValueKey(_tab), child: pages[_tab]),
     );
 
@@ -190,7 +228,7 @@ class _ShellState extends State<Shell> {
                       isSelected: _tab == i,
                       icon: Icon(_tab == i ? _dests[i].$2 : _dests[i].$1,
                           color: _tab == i ? kAccent : kMuted),
-                      onPressed: () => setState(() => _tab = i),
+                      onPressed: () => _go(i),
                     ),
                   const SizedBox(height: 8),
                 ]),
@@ -200,7 +238,7 @@ class _ShellState extends State<Shell> {
           Expanded(
             child: SafeArea(
               left: false,
-              child: Container(color: kBg, child: content),
+              child: content,
             ),
           ),
         ]),
@@ -221,12 +259,12 @@ class _ShellState extends State<Shell> {
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
-        onDestinationSelected: (i) => setState(() => _tab = i),
+        onDestinationSelected: _go,
         destinations: [
           for (final d in _dests)
             NavigationDestination(
               icon: _badge(d, Icon(d.$1)),
-              selectedIcon: _badge(d, Icon(d.$2)),
+              selectedIcon: _badge(d, Icon(d.$2).animate(key: ValueKey(_tab)).scale(begin: const Offset(.55, .55), duration: 520.ms, curve: Curves.elasticOut)),
               label: d.$3,
             ),
         ],

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 
 import '../state.dart';
 import '../theme.dart';
@@ -200,17 +202,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 (120, '2 min'),
                 (300, '5 min'),
               ])
-                ChoiceChip(
-                  label: Text(o.$2),
-                  selected: widget.state.screensaverSeconds == o.$1,
-                  onSelected: (_) => widget.state.setScreensaver(o.$1),
-                ),
+                _chip(o.$1, o.$2),
             ],
           ),
           const SizedBox(height: 24),
         ],
       ),
     );
+  }
+}
+
+extension _SettingsChips on _SettingsScreenState {
+  Widget _chip(int seconds, String label) {
+    final selected = widget.state.screensaverSeconds == seconds;
+    final chip = ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) {
+        if (selected) return;
+        HapticFeedback.selectionClick();
+        widget.state.setScreensaver(seconds);
+        if (seconds == 0) {
+          mascotController.wink();
+          island.show('Protetor de tela desligado', kind: IslandKind.info, duration: const Duration(milliseconds: 1500));
+        } else {
+          mascotController.yawn();
+          island.show('Protetor de tela: $label', kind: IslandKind.success, duration: const Duration(milliseconds: 1500));
+        }
+      },
+    );
+    return selected
+        ? chip.animate(key: ValueKey('sel-$seconds')).scale(begin: const Offset(.85, .85), duration: 520.ms, curve: Curves.elasticOut)
+        : chip;
   }
 }
 
