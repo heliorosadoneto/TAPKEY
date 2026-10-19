@@ -69,3 +69,11 @@ venv/
 /dist/
 /build/
 /desktop/build/
+
+# --- Artefatos de release versionados de propósito (releases/) ---
+!releases/
+!releases/TAPKEY.apk
+!releases/tapkey-desktop_*_amd64.deb
+!releases/TAPKEY-Desktop-linux-x64.tar.gz
+!releases/TAPKEY-Desktop-x86_64.AppImage
+!releases/SHA256SUMS

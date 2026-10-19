@@ -23,8 +23,49 @@ Atalhos no celular que abrem aplicativos no seu notebook Linux, bloqueiam/desblo
 
 ---
 
+## Download
+
+<div align="center">
+
+[![Android APK](https://img.shields.io/badge/Android-TAPKEY.apk%20(70%20MB)-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/heliorosadoneto/TAPKEY/raw/main/releases/TAPKEY.apk)
+[![Debian/Ubuntu .deb](https://img.shields.io/badge/Linux-.deb%20(7%20MB)-A81D33?style=for-the-badge&logo=debian&logoColor=white)](https://github.com/heliorosadoneto/TAPKEY/raw/main/releases/tapkey-desktop_0.1.0_amd64.deb)
+[![AppImage](https://img.shields.io/badge/Linux-AppImage%20(10%20MB)-0E76A8?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/heliorosadoneto/TAPKEY/raw/main/releases/TAPKEY-Desktop-x86_64.AppImage)
+[![tar.gz portátil](https://img.shields.io/badge/Linux-tar.gz%20(10%20MB)-555555?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/heliorosadoneto/TAPKEY/raw/main/releases/TAPKEY-Desktop-linux-x64.tar.gz)
+
+</div>
+
+Binários prontos em [`releases/`](releases/) (versão 0.4.0 do projeto; pacote 0.1.0). Nenhum IP ou token vem embutido: o pareamento é feito pelo QR do TAPKEY Desktop.
+
+**Celular (Android 7+):** baixe o `TAPKEY.apk`, permita "instalar apps desconhecidos" para o navegador/gerenciador de arquivos e toque no arquivo. O APK é universal (arm64, armv7, x86_64) e assinado com a chave de release própria do projeto.
+
+**Notebook (Linux x86_64):**
+
+```bash
+# .deb (Debian/Ubuntu/Mint)
+sudo apt install ./tapkey-desktop_0.1.0_amd64.deb
+tapkey-desktop
+
+# AppImage
+chmod +x TAPKEY-Desktop-x86_64.AppImage && ./TAPKEY-Desktop-x86_64.AppImage
+
+# tar.gz portátil
+tar xzf TAPKEY-Desktop-linux-x64.tar.gz && ./TAPKEY-Desktop/run.sh
+```
+
+AppImage e tar.gz precisam de `python3`, `openssl`, GTK 3 e `libayatana-appindicator3-1` no sistema (o .deb instala essas dependências).
+
+**Verificar os arquivos** (`sha256sum -c SHA256SUMS` dentro de `releases/`):
+
+```
+2717ed6a864c8b90e0c3f72c05879c40e42b9204eed9da5966fb84c1efe43d73  TAPKEY.apk
+004f07eb7ed4ea2092c7e48b917e4424210c1c084d11e4c2e3146e5701688e6f  tapkey-desktop_0.1.0_amd64.deb
+60014b848cd804192bfca15fe893d290557d41dbd0f44ca7dcb7b89bc371fedd  TAPKEY-Desktop-linux-x64.tar.gz
+8c03a4caa33159ba1fa48d896a07e8335e8c7c8a3fdc54d7f32d5cdf4e2d05f7  TAPKEY-Desktop-x86_64.AppImage
+```
+
 ## Índice
 
+- [Download](#download)
 - [O que é](#o-que-é)
 - [Galeria](#galeria)
 - [Recursos](#recursos)
