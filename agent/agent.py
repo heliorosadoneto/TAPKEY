@@ -7,8 +7,10 @@ import configparser
 import glob
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -29,6 +31,7 @@ CONFIG_DIR = os.path.expanduser("~/.config/tapkey")
 LEGACY_CONFIG_DIR = os.path.expanduser("~/.config/meu_notebook")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
 CLIENTS_FILE = os.path.join(CONFIG_DIR, "clients.json")
+DEVICES_FILE = os.path.join(CONFIG_DIR, "devices.json")
 TLS_DIR = os.path.join(CONFIG_DIR, "tls")
 CERT_FILE = os.path.join(TLS_DIR, "cert.pem")
 KEY_FILE = os.path.join(TLS_DIR, "key.pem")
@@ -88,6 +91,66 @@ def lan_ip():
         return "127.0.0.1"
     finally:
         s.close()
+
+
+# ---- rede: onde escutar e de quem aceitar ----
+# Interfaces que NUNCA recebem o agente por padrão (VPN, túneis, contêineres, VMs).
+EXCLUDED_IFACES = re.compile(r"^(lo|tun|tap|wg|docker|br-|veth|virbr|vmnet|vboxnet|tailscale|zt|ppp|utun|ipsec|"
+                             r"vpn|nordlynx|proton|tunnel|cni|flannel|kube|lxc|lxd|podman|incus|waydroid)", re.I)
+
+
+def _ip_addrs():
+    try:
+        out = subprocess.run(["ip", "-j", "addr", "show"], capture_output=True, text=True, timeout=3).stdout
+        return json.loads(out or "[]")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
+def lan_interfaces(raw=None):
+    """[(iface, ip, rede)] das interfaces Wi‑Fi/Ethernet com IPv4 privado (sem VPN/túnel/contêiner)."""
+    res = []
+    for it in (_ip_addrs() if raw is None else raw):
+        name = str(it.get("ifname", ""))
+        flags = it.get("flags", [])
+        if EXCLUDED_IFACES.match(name) or it.get("link_type") not in ("ether", None) \
+                or "POINTOPOINT" in flags or "UP" not in flags:
+            continue
+        for a in it.get("addr_info", []):
+            if a.get("family") != "inet":
+                continue
+            try:
+                net = ipaddress.ip_interface("%s/%s" % (a["local"], a.get("prefixlen", 32)))
+            except (KeyError, ValueError):
+                continue
+            ip = net.ip
+            if ip.is_private and not ip.is_loopback and not ip.is_link_local:
+                res.append((name, str(ip), net.network))
+    return res
+
+
+def listen_all():
+    return bool(read_settings().get("listen_all", False))
+
+
+_lan_nets = []  # redes das interfaces em que estamos escutando
+
+
+def source_allowed(ip):
+    """Só aceita origem em IP privado; no modo padrão, só das redes das interfaces LAN."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if getattr(a, "ipv4_mapped", None):
+        a = a.ipv4_mapped
+    if a.is_loopback:
+        return True
+    if not a.is_private or a.is_link_local or a.is_multicast:
+        return False
+    if listen_all() or os.environ.get("TAPKEY_BIND"):
+        return True
+    return any(a in n for n in list(_lan_nets))
 
 
 def parse_desktop(path):
@@ -281,17 +344,152 @@ def launch(app_id):
 
 TOKEN = ""
 
-_clients = {}
+_clients = {}  # device_id -> entrada
+_legacy = []  # entradas antigas (por IP, antes do device_id); migradas quando possível
 _clients_lock = threading.Lock()
 _clients_saved = 0.0
+DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+ONLINE_SECONDS = 30
 
 
-def record_client(ip, action=None, force_save=False):
-    """Guarda quem está falando com o agente (lido pelo TAPKEY Desktop)."""
+def clean_name(name):
+    name = "".join(ch for ch in str(name or "") if ch.isprintable()).strip()
+    return name[:60] or "Celular"
+
+
+def arp_mac(ip):
+    """MAC do IP na tabela ARP (só para migrar entradas antigas)."""
+    try:
+        with open("/proc/net/arp") as f:
+            for line in f.read().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 4 and parts[0] == ip and parts[3] != "00:00:00:00:00:00":
+                    return parts[3].lower()
+    except OSError:
+        pass
+    return ""
+
+
+# ---- aparelhos pareados (token por aparelho) ----
+_devices = {}
+_devices_mtime = None
+_dev_lock = threading.Lock()
+
+
+def _token_hash(tok):
+    return hashlib.sha256(tok.encode()).hexdigest()
+
+
+def load_devices():
+    """Relê devices.json se mudou (o TAPKEY Desktop remove aparelhos ao revogar)."""
+    global _devices, _devices_mtime
+    try:
+        m = os.stat(DEVICES_FILE).st_mtime_ns
+    except OSError:
+        m = None
+    with _dev_lock:
+        if m != _devices_mtime:
+            _devices_mtime = m
+            try:
+                with open(DEVICES_FILE) as f:
+                    d = json.load(f).get("devices", {})
+                _devices = d if isinstance(d, dict) else {}
+            except (OSError, ValueError, AttributeError):
+                _devices = {}
+        return dict(_devices)
+
+
+def _save_devices():
+    global _devices_mtime
+    tmp = DEVICES_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"devices": _devices}, f, indent=1)
+    os.replace(tmp, DEVICES_FILE)
+    _devices_mtime = os.stat(DEVICES_FILE).st_mtime_ns
+
+
+def register_device(dev_id, name):
+    """Emite um token só deste aparelho (o agente guarda apenas o hash SHA-256)."""
+    load_devices()
+    tok = secrets.token_urlsafe(32)
+    with _dev_lock:
+        _devices[dev_id] = {"name": clean_name(name), "token_sha256": _token_hash(tok), "paired": time.time()}
+        _save_devices()
+    return tok
+
+
+def device_key(dev_id, tok):
+    """Hash do token do aparelho se ele for válido (também é a chave do HMAC do desbloqueio)."""
+    if not dev_id or not tok:
+        return None
+    d = load_devices().get(dev_id)
+    if not d:
+        return None
+    h = _token_hash(tok)
+    return h if hmac.compare_digest(h, str(d.get("token_sha256", ""))) else None
+
+
+def _merge_into(c, old):
+    c["first_seen"] = min(c.get("first_seen", time.time()), old.get("first_seen", time.time()))
+    c["requests"] = c.get("requests", 0) + old.get("requests", 0)
+    c["launches"] = c.get("launches", 0) + old.get("launches", 0)
+    if not c.get("last_app"):
+        c["last_app"] = old.get("last_app", "")
+
+
+def load_clients():
+    """Carrega clients.json; entradas antigas (chave = IP) viram _legacy e as que
+    compartilham o mesmo MAC são unidas (o DHCP troca o IP do mesmo celular)."""
+    try:
+        with open(CLIENTS_FILE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    by_mac = {}
+    with _clients_lock:
+        for e in data.get("clients", []):
+            if not isinstance(e, dict):
+                continue
+            if e.get("device_id"):
+                _clients[e["device_id"]] = e
+                continue
+            if e.get("ip") in ("127.0.0.1", None):
+                continue
+            e["legacy"] = True
+            e.setdefault("mac", arp_mac(e["ip"]))
+            if e["mac"] and e["mac"] in by_mac:
+                keep = by_mac[e["mac"]]
+                _merge_into(keep, e)
+                keep["last_seen"] = max(keep.get("last_seen", 0), e.get("last_seen", 0))
+                continue
+            if e["mac"]:
+                by_mac[e["mac"]] = e
+            _legacy.append(e)
+        _events.extend(data.get("events", [])[:30])
+
+
+def record_client(dev_id, ip, name="", action=None, force_save=False):
+    """Guarda quem está falando com o agente, por APARELHO (lido pelo TAPKEY Desktop)."""
     global _clients_saved
     now = time.time()
     with _clients_lock:
-        c = _clients.setdefault(ip, {"ip": ip, "first_seen": now, "requests": 0, "launches": 0, "last_app": ""})
+        c = _clients.get(dev_id)
+        if c is None:
+            c = _clients[dev_id] = {"device_id": dev_id, "first_seen": now, "requests": 0, "launches": 0,
+                                    "last_app": "", "ips": []}
+        mac = arp_mac(ip)
+        if mac:
+            c["mac"] = mac
+        # migra entradas antigas do mesmo celular (mesmo IP ou mesmo MAC)
+        for old in [o for o in _legacy if o.get("ip") == ip or o.get("ip") in c.get("ips", [])
+                    or (mac and o.get("mac") == mac)]:
+            _merge_into(c, old)
+            _legacy.remove(old)
+        c["name"] = clean_name(name or c.get("name") or (load_devices().get(dev_id) or {}).get("name"))
+        c["ip"] = ip
+        if ip not in c.setdefault("ips", []):
+            c["ips"] = (c["ips"] + [ip])[-5:]
         c["last_seen"] = now
         c["requests"] += 1
         if action:
@@ -299,14 +497,21 @@ def record_client(ip, action=None, force_save=False):
             c["last_app"] = action
         if action or force_save or now - _clients_saved > 2:
             _clients_saved = now
-            data = sorted(_clients.values(), key=lambda x: -x["last_seen"])
-            try:
-                tmp = CLIENTS_FILE + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump({"updated": now, "clients": data, "events": _events}, f)
-                os.replace(tmp, CLIENTS_FILE)
-            except OSError:
-                pass
+            _save_clients_locked(now)
+
+
+def _save_clients_locked(now):
+    devs = load_devices()
+    for k in [k for k in _clients if k not in devs]:  # revogados somem da lista
+        del _clients[k]
+    data = sorted(_clients.values(), key=lambda x: -x["last_seen"]) + _legacy
+    try:
+        tmp = CLIENTS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"updated": now, "online_seconds": ONLINE_SECONDS, "clients": data, "events": _events}, f)
+        os.replace(tmp, CLIENTS_FILE)
+    except OSError:
+        pass
 
 
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -332,19 +537,24 @@ def unlock_allowed():
     return bool(read_settings().get("allow_unlock", False))
 
 
-def log_event(ip, event, ok=True, detail=""):
-    """Registra bloqueio/desbloqueio no log e na lista de conexões recentes."""
+def log_event(ip, event, ok=True, detail="", device=None):
+    """Registra bloqueio/desbloqueio no log e na lista de conexões recentes.
+    device = (device_id, nome) do aparelho autenticado."""
     now = time.time()
     entry = {"t": now, "ip": ip, "event": event, "ok": ok, "detail": detail}
+    if device:
+        entry["device_id"], entry["device"] = device
     with _clients_lock:
         _events.insert(0, entry)
         del _events[30:]
     try:
         with open(EVENTS_FILE, "a") as f:
-            f.write("%s %s %s ok=%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), ip, event, ok, detail))
+            f.write("%s %s %s %s ok=%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), ip,
+                                             device[1] if device else "-", event, ok, detail))
     except OSError:
         pass
-    record_client(ip, force_save=True)
+    if device:
+        record_client(device[0], ip, device[1], force_save=True)
 
 
 def _session_env():
@@ -441,14 +651,15 @@ def new_challenge(ip):
     return nonce
 
 
-def consume_challenge(nonce, proof, ip):
-    """Desafio de uso único, curto e atrelado ao IP; prova = HMAC-SHA256(token, nonce)."""
+def consume_challenge(nonce, proof, ip, key=None):
+    """Desafio de uso único, curto e atrelado ao aparelho;
+    prova = HMAC-SHA256(sha256(token do aparelho), nonce)."""
     now = time.time()
     with _sec_lock:
         item = _nonces.pop(nonce, None)
     if not item or item[0] < now or item[1] != ip:
         return False
-    expected = hmac.new(TOKEN.encode(), nonce.encode(), hashlib.sha256).hexdigest()
+    expected = hmac.new((key or TOKEN).encode(), nonce.encode(), hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, str(proof or ""))
 
 
@@ -528,24 +739,50 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _auth(self):
-        tok = self.headers.get("X-Token", "")
-        if not hmac.compare_digest(tok.encode(), TOKEN.encode()):
-            self._send(401, {"error": "Token inválido"})
+    def _auth(self, path):
+        """Autentica por APARELHO: X-Device-Id + X-Device-Token (emitido em /pair/register).
+        O token do QR (X-Token) só serve para registrar o aparelho e para /ping."""
+        ip = self.client_address[0]
+        self.device = None
+        self.device_key = None
+        if not source_allowed(ip):
+            self._send(403, {"error": "Origem não permitida"})
             return False
-        record_client(self.client_address[0])
-        return True
+        did = self.headers.get("X-Device-Id", "").strip()
+        name = clean_name(self.headers.get("X-Device-Name", ""))
+        if did and not DEVICE_ID_RE.match(did):
+            self._send(400, {"error": "X-Device-Id inválido"})
+            return False
+        key = device_key(did, self.headers.get("X-Device-Token", ""))
+        if key:
+            self.device = (did, name if self.headers.get("X-Device-Name") else
+                           clean_name(load_devices().get(did, {}).get("name")))
+            self.device_key = key
+            record_client(did, ip, self.device[1])
+            return True
+        master = hmac.compare_digest(self.headers.get("X-Token", "").encode(), TOKEN.encode())
+        if master and path in ("/ping", "/pair/register"):
+            return True
+        if did and self.headers.get("X-Device-Token"):
+            self._send(401, {"error": "Este aparelho foi revogado ou não está pareado. Escaneie o QR de novo.",
+                             "revoked": True})
+        else:
+            self._send(401, {"error": "Token inválido"})
+        return False
 
     def do_GET(self):
         path = unquote(urlparse(self.path).path)
-        if not self._auth():
+        if not self._auth(path):
             return
         if path == "/ping":
             self._send(200, {"ok": True, "host": socket.gethostname()})
         elif path == "/session":
             self._send(200, {"locked": is_locked(), "unlock_allowed": unlock_allowed()})
         elif path == "/challenge":
-            self._send(200, {"nonce": new_challenge(self.client_address[0]), "expires_in": NONCE_TTL})
+            if not self.device:
+                self._send(401, {"error": "Aparelho não pareado"})
+                return
+            self._send(200, {"nonce": new_challenge(self.device[0]), "expires_in": NONCE_TTL})
         elif path == "/cursor/state":
             if self._cursor_enabled():
                 self._send(200, BRIDGE.snapshot())
@@ -605,13 +842,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if not self._auth():
+        if not self._auth(path):
             return
         ip = self.client_address[0]
         data = self._body()
         if data is None:
             self._send(400, {"error": "Requisição inválida"})
             return
+        if path == "/pair/register":
+            did = self.headers.get("X-Device-Id", "").strip()
+            if not DEVICE_ID_RE.match(did):
+                self._send(400, {"error": "X-Device-Id ausente ou inválido"})
+                return
+            name = clean_name(self.headers.get("X-Device-Name", "") or data.get("name", ""))
+            tok = register_device(did, name)
+            record_client(did, ip, name, force_save=True)
+            log_event(ip, "Pareado", True, "", (did, name))
+            self._send(200, {"ok": True, "device_token": tok, "device_id": did, "name": name})
+            return
+        if not self.device:
+            self._send(401, {"error": "Aparelho não pareado. Escaneie o QR de novo.", "revoked": True})
+            return
+        dev = self.device
         if path == "/launch":
             try:
                 app_id = str(data["id"])
@@ -620,7 +872,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             ok, msg = launch(app_id)
             if ok:
-                record_client(ip, (scan_apps().get(app_id) or {}).get("name", app_id))
+                record_client(dev[0], ip, dev[1], (scan_apps().get(app_id) or {}).get("name", app_id))
             self._send(200 if ok else 404, {"ok": ok, "message": msg})
         elif path == "/cursor/approval":
             if not self._cursor_enabled():
@@ -643,23 +895,23 @@ class Handler(BaseHTTPRequestHandler):
             self._send(code, body)
         elif path == "/lock":
             ok, msg, how = do_lock()
-            log_event(ip, "Bloqueio", ok, how or msg)
+            log_event(ip, "Bloqueio", ok, how or msg, dev)
             self._send(200 if ok else 500, {"ok": ok, "message": msg, "locked": is_locked()})
         elif path == "/unlock":
             if not unlock_allowed():
-                log_event(ip, "Desbloqueio negado", False, "opção desativada")
+                log_event(ip, "Desbloqueio negado", False, "opção desativada", dev)
                 self._send(403, {"error": "O desbloqueio pelo celular está desativado. Ative em TAPKEY Desktop > Permitir desbloqueio pelo celular."})
                 return
-            if rate_limited(ip):
-                log_event(ip, "Desbloqueio negado", False, "limite de tentativas")
+            if rate_limited(dev[0]) or rate_limited("ip:" + ip):
+                log_event(ip, "Desbloqueio negado", False, "limite de tentativas", dev)
                 self._send(429, {"error": "Muitas tentativas. Aguarde um minuto."})
                 return
-            if not consume_challenge(str(data.get("nonce", "")), data.get("proof"), ip):
-                log_event(ip, "Desbloqueio negado", False, "desafio inválido")
+            if not consume_challenge(str(data.get("nonce", "")), data.get("proof"), dev[0], self.device_key):
+                log_event(ip, "Desbloqueio negado", False, "desafio inválido", dev)
                 self._send(400, {"error": "Desafio inválido ou expirado. Tente de novo."})
                 return
             ok, msg, how = do_unlock()
-            log_event(ip, "Desbloqueio", ok, how or msg)
+            log_event(ip, "Desbloqueio", ok, how or msg, dev)
             self._send(200 if ok else 500, {"ok": ok, "message": msg, "locked": is_locked()})
         else:
             self._send(404, {"error": "Não encontrado"})
@@ -719,14 +971,70 @@ class HookHandler(BaseHTTPRequestHandler):
 
 
 _SHUTDOWN = threading.Event()
+SSL_CTX = None
+
+
+class Listeners:
+    """Mantém um servidor por IP de LAN e refaz o bind quando o IP muda."""
+
+    def __init__(self):
+        self.servers = {}
+        self.warned = set()
+
+    def desired(self):
+        global _lan_nets
+        forced = os.environ.get("TAPKEY_BIND", "").strip()
+        lans = lan_interfaces()
+        _lan_nets = [n for _, _, n in lans]
+        if forced:
+            return {a.strip() for a in forced.split(",") if a.strip()}
+        if listen_all():
+            return {"0.0.0.0"}
+        return {ip for _, ip, _ in lans}
+
+    def sync(self):
+        want = self.desired()
+        for addr in [a for a in self.servers if a not in want]:
+            srv = self.servers.pop(addr)
+            srv.shutdown()
+            srv.server_close()
+            print("Parou de escutar em %s:%d" % (addr, PORT), flush=True)
+        for addr in sorted(want - set(self.servers)):
+            try:
+                srv = QuietServer((addr, PORT), Handler)
+            except OSError as ex:
+                if addr not in self.warned:
+                    print("Aviso: não consegui escutar em %s:%d (%s)" % (addr, PORT, ex), file=sys.stderr, flush=True)
+                    self.warned.add(addr)
+                continue
+            self.warned.discard(addr)
+            srv.daemon_threads = True
+            if SSL_CTX:
+                # handshake feito na thread da conexão (não trava o accept)
+                srv.socket = SSL_CTX.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            self.servers[addr] = srv
+            print("Escutando em %s:%d" % (addr, PORT), flush=True)
+        if not want:
+            print("Aviso: nenhuma interface Wi‑Fi/Ethernet com IP privado; aguardando rede.", file=sys.stderr, flush=True)
+
+    def run(self):
+        while not _SHUTDOWN.is_set():
+            try:
+                self.sync()
+            except Exception as ex:  # nunca derruba o agente
+                print("rebind erro: %r" % (ex,), file=sys.stderr, flush=True)
+            _SHUTDOWN.wait(5)
 
 
 def main():
-    global TOKEN, BRIDGE, HOOK_SECRET, TLS_ON, TLS_FP
+    global TOKEN, BRIDGE, HOOK_SECRET, TLS_ON, TLS_FP, SSL_CTX
     TOKEN = load_token()
     HOOK_SECRET = load_hook_secret()
     BRIDGE = cursor_bridge.Bridge(CONFIG_DIR, read_settings)
-    ip = lan_ip()
+    load_clients()
+    lans = lan_interfaces()
+    ip = lans[0][1] if lans else lan_ip()
     legacy = bool(read_settings().get("legacy_http", False))
     if not legacy:
         try:
@@ -749,14 +1057,13 @@ def main():
     print(" (token salvo em %s)" % TOKEN_FILE)
     print(" Aplicativos encontrados: %d" % len(scan_apps(force=True)))
     print("=" * 50, flush=True)
-    srv = QuietServer(("0.0.0.0", PORT), Handler)
-    srv.daemon_threads = True
     if TLS_ON:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ctx.load_cert_chain(CERT_FILE, KEY_FILE)
-        # handshake feito na thread da conexão (não trava o accept)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
+        SSL_CTX = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        SSL_CTX.minimum_version = ssl.TLSVersion.TLSv1_2
+        SSL_CTX.load_cert_chain(CERT_FILE, KEY_FILE)
+    print(" Escuta   : %s" % ("todas as interfaces (opção avançada)" if listen_all() else
+                             "só Wi‑Fi/Ethernet privadas: %s" % (", ".join("%s %s" % (n, i) for n, i, _ in lans) or "nenhuma")),
+          flush=True)
     hook_srv = None
     try:
         hook_srv = ThreadingHTTPServer(("127.0.0.1", HOOK_PORT), HookHandler)
@@ -767,8 +1074,9 @@ def main():
         os.chmod(HOOK_INFO_FILE, 0o600)
     except OSError as ex:
         print("Aviso: listener de hooks indisponível (%s)" % ex, file=sys.stderr)
+    mgr = Listeners()
     try:
-        srv.serve_forever()
+        mgr.run()
     except KeyboardInterrupt:
         print("\nEncerrado.")
     finally:

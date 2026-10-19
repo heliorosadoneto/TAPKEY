@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT = os.path.join(os.path.dirname(HERE), "agent.py")
@@ -33,6 +34,7 @@ def free_port():
 
 class Env:
     def __init__(self, legacy=False, approval_timeout=2):
+        self.legacy = legacy
         self.home = tempfile.mkdtemp(prefix="tapkey-test-")
         self.cfg = os.path.join(self.home, ".config", "tapkey")
         os.makedirs(self.cfg)
@@ -45,7 +47,7 @@ class Env:
             self.settings(legacy_http=True)
         env = dict(os.environ, HOME=self.home, MEU_NOTEBOOK_PORT=str(self.port), TAPKEY_HOOK_PORT=str(self.hook_port),
                    TAPKEY_APPROVAL_TIMEOUT=str(approval_timeout), PATH=self.bin + ":/usr/bin:/bin",
-                   XDG_RUNTIME_DIR=self.home)
+                   XDG_RUNTIME_DIR=self.home, TAPKEY_BIND="127.0.0.1")
         self.env = env
         self.proc = subprocess.Popen([sys.executable, AGENT], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         for _ in range(100):
@@ -54,7 +56,22 @@ class Env:
                 break
             except OSError:
                 time.sleep(0.1)
+        for _ in range(100):
+            try:
+                socket.create_connection(("127.0.0.1", self.port), 0.2).close()
+                break
+            except OSError:
+                time.sleep(0.1)
         self.token = open(os.path.join(self.cfg, "token")).read().strip()
+        self.device_id = "test-device-0001"
+        st, body = self.req("POST", "/pair/register", {}, token="master",
+                            extra={"X-Device-Id": self.device_id, "X-Device-Name": "Pixel Teste"})
+        assert st == 200, (st, body)
+        self.device_token = body["device_token"]
+
+    def dev_headers(self, did=None, tok=None):
+        return {"X-Device-Id": did or self.device_id, "X-Device-Token": tok or self.device_token,
+                "X-Device-Name": "Pixel Teste"}
 
     def settings(self, **kw):
         p = os.path.join(self.cfg, "settings.json")
@@ -63,14 +80,18 @@ class Env:
         json.dump(cur, open(p, "w"))
 
     def conn(self, timeout=10):
+        if self.legacy:
+            return http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return http.client.HTTPSConnection("127.0.0.1", self.port, timeout=timeout, context=ctx)
 
-    def req(self, method, path, body=None, token=True):
+    def req(self, method, path, body=None, token=True, extra=None):
+        """token=True: credenciais do aparelho; "master": token do QR; False: nada."""
         c = self.conn()
-        h = {"X-Token": self.token} if token else {}
+        h = {"X-Token": self.token} if token == "master" else (self.dev_headers() if token else {})
+        h.update(extra or {})
         if body is not None:
             h["Content-Type"] = "application/json"
         c.request(method, path, json.dumps(body) if body is not None else None, h)
@@ -114,7 +135,7 @@ class SSE(threading.Thread):
 
     def run(self):
         c = self.env.conn(timeout=30)
-        c.request("GET", "/cursor/events", headers={"X-Token": self.env.token})
+        c.request("GET", "/cursor/events", headers=self.env.dev_headers())
         r = c.getresponse()
         ev = None
         while not self.stop:
@@ -155,6 +176,7 @@ class TlsTests(unittest.TestCase):
     def test_requires_token(self):
         self.assertEqual(self.e.req("GET", "/ping", token=False)[0], 401)
         self.assertEqual(self.e.req("GET", "/ping")[0], 200)
+        self.assertEqual(self.e.req("GET", "/ping", token="master")[0], 200)
 
     def test_plain_http_is_refused_on_tls_port(self):
         c = http.client.HTTPConnection("127.0.0.1", self.e.port, timeout=3)
@@ -175,13 +197,166 @@ class LegacyTests(unittest.TestCase):
         e = Env(legacy=True)
         try:
             c = http.client.HTTPConnection("127.0.0.1", e.port, timeout=3)
-            c.request("GET", "/ping", headers={"X-Token": e.token})
+            c.request("GET", "/ping", headers=e.dev_headers())
             self.assertEqual(c.getresponse().status, 200)
             hc = http.client.HTTPConnection("127.0.0.1", e.hook_port)
             hc.request("GET", "/status")
             self.assertFalse(json.loads(hc.getresponse().read())["tls"])
         finally:
             e.close()
+
+
+class DeviceTests(unittest.TestCase):
+    def setUp(self):
+        self.e = Env()
+
+    def tearDown(self):
+        self.e.close()
+
+    def clients(self):
+        return json.load(open(os.path.join(self.e.cfg, "clients.json")))["clients"]
+
+    def test_master_token_only_registers(self):
+        self.assertEqual(self.e.req("GET", "/apps", token="master")[0], 401)
+        self.assertEqual(self.e.req("POST", "/lock", {}, token="master")[0], 401)
+        self.assertEqual(self.e.req("GET", "/apps")[0], 200)
+
+    def test_register_requires_master_and_valid_id(self):
+        self.assertEqual(self.e.req("POST", "/pair/register", {}, token=False,
+                                    extra={"X-Device-Id": "outro-aparelho-1"})[0], 401)
+        self.assertEqual(self.e.req("POST", "/pair/register", {}, token="master",
+                                    extra={"X-Device-Id": "x y"})[0], 400)
+
+    def test_devices_file_private_and_hashed(self):
+        p = os.path.join(self.e.cfg, "devices.json")
+        self.assertEqual(oct(os.stat(p).st_mode & 0o777), "0o600")
+        raw = open(p).read()
+        self.assertNotIn(self.e.device_token, raw)
+        self.assertIn("Pixel Teste", raw)
+
+    def test_same_device_new_ip_is_one_client(self):
+        for _ in range(3):
+            self.e.req("GET", "/ping")
+        time.sleep(0.1)
+        self.e.req("POST", "/lock", {"x": 1})  # força gravação
+        cl = [c for c in self.clients() if not c.get("legacy")]
+        self.assertEqual(len(cl), 1)
+        self.assertEqual(cl[0]["device_id"], self.e.device_id)
+        self.assertEqual(cl[0]["name"], "Pixel Teste")
+        self.assertEqual(cl[0]["ip"], "127.0.0.1")
+
+    def test_revoke_device(self):
+        p = os.path.join(self.e.cfg, "devices.json")
+        st, b = self.e.req("POST", "/pair/register", {}, token="master",
+                           extra={"X-Device-Id": "segundo-celular", "X-Device-Name": "Outro"})
+        tok2 = b["device_token"]
+        h2 = {"X-Device-Id": "segundo-celular", "X-Device-Token": tok2}
+        self.assertEqual(self.e.req("GET", "/apps", token=False, extra=h2)[0], 200)
+        d = json.load(open(p))
+        del d["devices"]["segundo-celular"]  # o que o TAPKEY Desktop faz em "Revogar este aparelho"
+        json.dump(d, open(p, "w"))
+        st, body = self.e.req("GET", "/apps", token=False, extra=h2)
+        self.assertEqual(st, 401)
+        self.assertTrue(body.get("revoked"))
+        self.assertEqual(self.e.req("GET", "/apps")[0], 200)  # o outro aparelho segue funcionando
+        self.e.req("POST", "/lock", {})
+        self.assertNotIn("segundo-celular", [c.get("device_id") for c in self.clients()])
+
+    def test_wrong_device_token(self):
+        self.assertEqual(self.e.req("GET", "/apps", token=False,
+                                    extra={"X-Device-Id": self.e.device_id, "X-Device-Token": "nope"})[0], 401)
+
+    def test_unlock_proof_uses_device_key(self):
+        self.e.settings(allow_unlock=True)
+        st, ch = self.e.req("GET", "/challenge")
+        self.assertEqual(st, 200)
+        bad = hmac.new(self.e.token.encode(), ch["nonce"].encode(), hashlib.sha256).hexdigest()
+        self.assertEqual(self.e.req("POST", "/unlock", {"nonce": ch["nonce"], "proof": bad})[0], 400)
+        self.assertEqual(self.e.req("GET", "/challenge", token="master")[0], 401)
+
+
+class LegacyMigrationTests(unittest.TestCase):
+    def test_ip_entries_merge_into_device(self):
+        home = tempfile.mkdtemp(prefix="tapkey-mig-")
+        cfg = os.path.join(home, ".config", "tapkey")
+        os.makedirs(cfg)
+        now = time.time()
+        json.dump({"clients": [
+            {"ip": "127.0.0.1", "first_seen": now - 99, "last_seen": now - 9, "requests": 7, "launches": 2, "last_app": "X"},
+            {"ip": "192.168.88.198", "mac": "4a:8a:17:17:fe:6d", "first_seen": now - 50, "last_seen": now - 40,
+             "requests": 3, "launches": 1, "last_app": "Y"},
+            {"ip": "192.168.88.202", "mac": "4a:8a:17:17:fe:6d", "first_seen": now - 30, "last_seen": now - 20,
+             "requests": 4, "launches": 1, "last_app": "Z"}]}, open(os.path.join(cfg, "clients.json"), "w"))
+        sys.path.insert(0, os.path.dirname(AGENT))
+        import importlib
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        try:
+            import agent as ag
+            ag = importlib.reload(ag)
+            ag.load_clients()
+            self.assertEqual(len(ag._legacy), 1)  # .198 e .202 têm o mesmo MAC: um celular só
+            self.assertEqual(ag._legacy[0]["requests"], 7)
+            ag.register_device("celular-do-helio", "Moto")
+            ag._legacy[0]["ip"] = "192.168.88.210"
+            ag.record_client("celular-do-helio", "192.168.88.210", "Moto", force_save=True)
+            self.assertEqual(ag._legacy, [])
+            c = ag._clients["celular-do-helio"]
+            self.assertEqual(c["requests"], 8)
+            self.assertEqual(c["launches"], 2)
+        finally:
+            if old_home is None:
+                del os.environ["HOME"]
+            else:
+                os.environ["HOME"] = old_home
+            shutil.rmtree(home, ignore_errors=True)
+
+
+class NetworkTests(unittest.TestCase):
+    RAW = [
+        {"ifname": "lo", "flags": ["LOOPBACK", "UP"], "link_type": "loopback",
+         "addr_info": [{"family": "inet", "local": "127.0.0.1", "prefixlen": 8}]},
+        {"ifname": "wlp2s0", "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"], "link_type": "ether",
+         "addr_info": [{"family": "inet", "local": "192.168.88.251", "prefixlen": 24}]},
+        {"ifname": "tunnelc9", "flags": ["POINTOPOINT", "UP"], "link_type": "none",
+         "addr_info": [{"family": "inet", "local": "10.8.0.5", "prefixlen": 32}]},
+        {"ifname": "docker0", "flags": ["UP"], "link_type": "ether",
+         "addr_info": [{"family": "inet", "local": "172.17.0.1", "prefixlen": 16}]},
+        {"ifname": "wg0", "flags": ["UP"], "link_type": "none",
+         "addr_info": [{"family": "inet", "local": "10.9.0.2", "prefixlen": 24}]},
+        {"ifname": "enp3s0", "flags": ["UP"], "link_type": "ether",
+         "addr_info": [{"family": "inet", "local": "8.8.4.4", "prefixlen": 24}]},
+    ]
+
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(AGENT))
+        import agent as ag
+        self.ag = ag
+
+    def test_only_private_lan_interfaces(self):
+        got = [(n, ip) for n, ip, _ in self.ag.lan_interfaces(self.RAW)]
+        self.assertEqual(got, [("wlp2s0", "192.168.88.251")])
+
+    def test_source_filter(self):
+        ag = self.ag
+        import ipaddress
+        old = ag._lan_nets
+        ag._lan_nets = [ipaddress.ip_network("192.168.88.0/24")]
+        env_bind = os.environ.pop("TAPKEY_BIND", None)
+        try:
+            with unittest.mock.patch.object(ag, "listen_all", return_value=False):
+                self.assertTrue(ag.source_allowed("192.168.88.202"))
+                self.assertTrue(ag.source_allowed("127.0.0.1"))
+                self.assertFalse(ag.source_allowed("10.8.0.1"))      # VPN
+                self.assertFalse(ag.source_allowed("8.8.8.8"))       # pública
+                self.assertFalse(ag.source_allowed("::ffff:1.1.1.1"))
+            with unittest.mock.patch.object(ag, "listen_all", return_value=True):
+                self.assertTrue(ag.source_allowed("10.8.0.1"))
+                self.assertFalse(ag.source_allowed("8.8.8.8"))       # pública nunca
+        finally:
+            ag._lan_nets = old
+            if env_bind is not None:
+                os.environ["TAPKEY_BIND"] = env_bind
 
 
 class CursorTests(unittest.TestCase):

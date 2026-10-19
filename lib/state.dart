@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -28,7 +30,18 @@ class AppState extends ChangeNotifier {
   late SharedPreferences _prefs;
   String host = kDefaultHost;
   int port = kDefaultPort;
+  /// Token do QR (pareamento). Depois do registro ele é descartado e o app passa
+  /// a usar só o token deste aparelho (revogável no TAPKEY Desktop).
   String token = kDefaultToken;
+
+  /// Identidade estável deste celular (gerada uma vez e guardada no aparelho).
+  String deviceId = '';
+  String deviceName = 'Celular';
+  String deviceToken = '';
+
+  /// O notebook revogou este aparelho: precisa escanear o QR de novo.
+  bool revoked = false;
+  static const _deviceChannel = MethodChannel('tapkey/device');
 
   /// Fingerprint SHA-256 (hex) do certificado do notebook. Vazio = HTTP legado (sem TLS).
   String fp = kDefaultFp;
@@ -47,13 +60,89 @@ class AppState extends ChangeNotifier {
 
   bool get secure => fp.isNotEmpty;
   String get baseUrl => '${secure ? 'https' : 'http'}://$host:$port';
-  Map<String, String> get headers => {'X-Token': token};
+  bool get paired => deviceToken.isNotEmpty;
+  Map<String, String> get headers => {
+    'X-Device-Id': deviceId,
+    'X-Device-Name': deviceName,
+    if (paired) 'X-Device-Token': deviceToken else 'X-Token': token,
+  };
+
+  static String _newDeviceId() {
+    final r = Random.secure();
+    return base64Url
+        .encode(List<int>.generate(16, (_) => r.nextInt(256)))
+        .replaceAll('=', '');
+  }
+
+  Future<void> _loadDevice() async {
+    deviceId = _prefs.getString('device_id') ?? '';
+    if (!RegExp(r'^[A-Za-z0-9_-]{8,64}$').hasMatch(deviceId)) {
+      deviceId = _newDeviceId();
+      await _prefs.setString('device_id', deviceId);
+    }
+    deviceToken = _prefs.getString('device_token') ?? '';
+    try {
+      final m = await _deviceChannel.invokeMethod<String>('model');
+      if (m != null && m.trim().isNotEmpty) deviceName = m.trim();
+    } catch (_) {}
+    // cabeçalhos HTTP: só ASCII imprimível
+    deviceName = deviceName.replaceAll(RegExp(r'[^\x20-\x7E]'), '').trim();
+    if (deviceName.isEmpty) deviceName = 'Celular';
+    if (deviceName.length > 60) deviceName = deviceName.substring(0, 60);
+  }
+
+  /// Troca o token do QR por um token só deste aparelho.
+  Future<bool> _ensureRegistered() async {
+    if (paired) return true;
+    if (token.isEmpty) return false;
+    try {
+      final r = await http
+          .post(
+            Uri.parse('$baseUrl/pair/register'),
+            headers: {...headers, 'Content-Type': 'application/json'},
+            body: jsonEncode({'name': deviceName}),
+          )
+          .timeout(const Duration(seconds: 5));
+      if (r.statusCode != 200) return false;
+      final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+      final t = (j['device_token'] ?? '') as String;
+      if (t.isEmpty) return false;
+      deviceToken = t;
+      token = '';
+      revoked = false;
+      await _prefs.setString('device_token', deviceToken);
+      await _prefs.remove('token');
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _checkRevoked(http.Response r) {
+    if (r.statusCode != 401 || !paired) return;
+    try {
+      final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+      if (j['revoked'] != true) return;
+    } catch (_) {
+      return;
+    }
+    deviceToken = '';
+    revoked = true;
+    _prefs.remove('device_token');
+    notifyListeners();
+  }
+
+  String get authError => revoked
+      ? 'Este aparelho foi revogado no notebook. Escaneie o QR de novo.'
+      : 'Token inválido. Verifique em Configurações.';
 
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
     host = _prefs.getString('host') ?? kDefaultHost;
     port = _prefs.getInt('port') ?? kDefaultPort;
     token = _prefs.getString('token') ?? kDefaultToken;
+    await _loadDevice();
     fp = _prefs.getString('fp') ?? kDefaultFp;
     notebookName = _prefs.getString('name') ?? '';
     screensaverSeconds = _prefs.getInt('screensaver') ?? 60;
@@ -89,14 +178,19 @@ class AppState extends ChangeNotifier {
   }) async {
     host = h.trim();
     port = p;
-    token = t.trim();
+    // Token novo (QR ou digitado) = novo pareamento; vazio = mantém o deste aparelho.
+    if (t.trim().isNotEmpty) {
+      token = t.trim();
+      deviceToken = '';
+      await _prefs.remove('device_token');
+    }
     if (fingerprint != null) {
       fp = fingerprint.trim().toLowerCase().replaceAll(':', '');
     }
     if (name != null) notebookName = name;
     await _prefs.setString('host', host);
     await _prefs.setInt('port', port);
-    await _prefs.setString('token', token);
+    if (token.isNotEmpty) await _prefs.setString('token', token);
     await _prefs.setString('fp', fp);
     await _prefs.setString('name', notebookName);
     notifyListeners();
@@ -106,10 +200,12 @@ class AppState extends ChangeNotifier {
   Future<bool> checkConnection() async {
     bool ok = false;
     try {
+      await _ensureRegistered();
       final r = await http
           .get(Uri.parse('$baseUrl/ping'), headers: headers)
           .timeout(const Duration(seconds: 3));
-      ok = r.statusCode == 200;
+      _checkRevoked(r);
+      ok = r.statusCode == 200 && paired;
     } catch (_) {}
     final changed = ok != connected;
     if (changed) {
@@ -203,7 +299,8 @@ class AppState extends ChangeNotifier {
         return (true, (j['message'] ?? 'Pronto') as String);
       }
       if (r.statusCode == 401) {
-        return (false, 'Token inválido. Verifique em Configurações.');
+        _checkRevoked(r);
+        return (false, authError);
       }
       return (
         false,
@@ -231,9 +328,11 @@ class AppState extends ChangeNotifier {
       }
       final nonce =
           (jsonDecode(r.body) as Map<String, dynamic>)['nonce'] as String;
+      // chave = SHA-256 (hex) do token deste aparelho (o agente só guarda o hash)
+      final key = sha256.convert(utf8.encode(deviceToken)).toString();
       final proof = Hmac(
         sha256,
-        utf8.encode(token),
+        utf8.encode(key),
       ).convert(utf8.encode(nonce)).toString();
       final res = await post('/unlock', {'nonce': nonce, 'proof': proof});
       await refreshSession();
@@ -309,7 +408,8 @@ class AppState extends ChangeNotifier {
         return (true, 'Abrindo ${a.name} no notebook…');
       }
       if (r.statusCode == 401) {
-        return (false, 'Token inválido. Verifique em Configurações.');
+        _checkRevoked(r);
+        return (false, authError);
       }
       return (false, 'Não consegui abrir ${a.name}.');
     } catch (_) {
@@ -323,7 +423,10 @@ class AppState extends ChangeNotifier {
     final r = await http
         .get(Uri.parse('$baseUrl/apps'), headers: headers)
         .timeout(const Duration(seconds: 8));
-    if (r.statusCode == 401) throw Exception('Token inválido');
+    if (r.statusCode == 401) {
+      _checkRevoked(r);
+      throw Exception(authError);
+    }
     if (r.statusCode != 200) throw Exception('Erro ${r.statusCode}');
     final list = jsonDecode(utf8.decode(r.bodyBytes)) as List;
     return list

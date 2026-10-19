@@ -24,7 +24,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     text: widget.state.port.toString(),
   );
   late final TextEditingController _token = TextEditingController(
-    text: widget.state.token,
+    text: widget.state.paired ? '' : widget.state.token,
   );
   late final TextEditingController _fp = TextEditingController(
     text: widget.state.fp,
@@ -141,6 +141,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             obscureText: _obscure,
             decoration: InputDecoration(
               labelText: 'Token',
+              helperText: widget.state.paired
+                  ? 'Pareado como "${widget.state.deviceName}". Deixe vazio para manter.'
+                  : (widget.state.revoked
+                        ? 'Aparelho revogado no notebook: escaneie o QR de novo.'
+                        : null),
               prefixIcon: const Icon(Icons.key),
               suffixIcon: IconButton(
                 icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),

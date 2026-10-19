@@ -2,6 +2,21 @@
 
 Marcos do projeto, do mais novo ao mais antigo. Os números de versão são marcos de funcionalidade; o pacote `.deb` e o `pubspec.yaml` ainda usam `0.1.0` / `1.0.0+1`. Formato inspirado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 
+## [0.5.0] — 2026-10-19 · Aparelhos e rede
+
+### Corrigido
+- **O mesmo celular aparecia duas vezes** no TAPKEY Desktop quando o DHCP trocava o IP: `clients.json` agora é agrupado por aparelho (`device_id`), não por IP; entradas antigas são unidas pelo mesmo IP/MAC e não contam mais. "online" só se visto nos últimos 30 s.
+- **O agente escutava em `0.0.0.0`**, ficando acessível também pela VPN (`tunnelc9 10.8.0.5`).
+
+### Adicionado
+- Identidade por aparelho: `device_id` aleatório e estável + nome (fabricante e modelo) em `X-Device-Id` / `X-Device-Name`; `POST /pair/register` troca o token do QR por um **token por aparelho** (só o hash fica em `devices.json`, 0600); o desbloqueio usa a chave do aparelho.
+- **Revogar este aparelho** no Desktop (os outros continuam); o celular avisa que foi revogado e pede o QR.
+- Bind só nos IPs privados de Wi‑Fi/Ethernet (exclui VPN/túneis/contêineres/VMs), refeito sozinho quando o IP muda; origem de IP público recusada (`403`); opção avançada **Escutar em todas as interfaces** (desligada).
+- 10 testes novos do agente (38 no total).
+
+### Mudou
+- O token do QR deixou de valer para as rotas normais (só `/pair/register` e `/ping`). Apps antigos param de funcionar até atualizar o app (a migração no app novo é automática).
+
 ## [0.4.0] — 2026-10-18 · Pacote de animações
 
 ### Adicionado

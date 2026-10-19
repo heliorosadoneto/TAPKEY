@@ -6,22 +6,42 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 class ClientInfo {
+  /// Celular identificado pelo device_id (o IP muda com o DHCP).
+  final String deviceId;
+  final String name;
+  final bool legacy;
   final String ip;
   final DateTime lastSeen;
   final DateTime firstSeen;
   final int requests;
   final int launches;
   final String lastApp;
-  const ClientInfo(this.ip, this.firstSeen, this.lastSeen, this.requests, this.launches, this.lastApp);
+  const ClientInfo(
+    this.ip,
+    this.firstSeen,
+    this.lastSeen,
+    this.requests,
+    this.launches,
+    this.lastApp, {
+    this.deviceId = '',
+    this.name = '',
+    this.legacy = false,
+  });
+
+  /// "online" só se falou com o agente nos últimos 30 s (o app faz ping a cada 5 s).
+  bool get online => !legacy && DateTime.now().difference(lastSeen).inSeconds < 30;
 
   factory ClientInfo.fromJson(Map<String, dynamic> j) => ClientInfo(
-        j['ip'] as String,
-        DateTime.fromMillisecondsSinceEpoch(((j['first_seen'] as num) * 1000).round()),
-        DateTime.fromMillisecondsSinceEpoch(((j['last_seen'] as num) * 1000).round()),
-        (j['requests'] as num).toInt(),
-        (j['launches'] as num).toInt(),
-        (j['last_app'] ?? '') as String,
-      );
+    j['ip'] as String,
+    DateTime.fromMillisecondsSinceEpoch(((j['first_seen'] as num) * 1000).round()),
+    DateTime.fromMillisecondsSinceEpoch(((j['last_seen'] as num) * 1000).round()),
+    (j['requests'] as num).toInt(),
+    (j['launches'] as num).toInt(),
+    (j['last_app'] ?? '') as String,
+    deviceId: (j['device_id'] ?? '') as String,
+    name: (j['name'] ?? '') as String,
+    legacy: j['legacy'] == true || j['device_id'] == null,
+  );
 }
 
 class EventInfo {
@@ -33,12 +53,12 @@ class EventInfo {
   const EventInfo(this.time, this.ip, this.event, this.ok, this.detail);
 
   factory EventInfo.fromJson(Map<String, dynamic> j) => EventInfo(
-        DateTime.fromMillisecondsSinceEpoch(((j['t'] as num) * 1000).round()),
-        (j['ip'] ?? '') as String,
-        (j['event'] ?? '') as String,
-        j['ok'] == true,
-        (j['detail'] ?? '') as String,
-      );
+    DateTime.fromMillisecondsSinceEpoch(((j['t'] as num) * 1000).round()),
+    (j['device'] ?? j['ip'] ?? '') as String,
+    (j['event'] ?? '') as String,
+    j['ok'] == true,
+    (j['detail'] ?? '') as String,
+  );
 }
 
 /// Controla o agente Python: iniciar/parar, token, autostart e status.
@@ -48,6 +68,7 @@ class AgentService extends ChangeNotifier {
   late final String configDir = '$home/.config/tapkey';
   late final String tokenFile = '$configDir/token';
   late final String clientsFile = '$configDir/clients.json';
+  late final String devicesFile = '$configDir/devices.json';
   late final String autostartFile = '$home/.config/autostart/tapkey-desktop.desktop';
 
   String token = '';
@@ -60,6 +81,7 @@ class AgentService extends ChangeNotifier {
   List<EventInfo> events = [];
   bool allowUnlock = false;
   bool legacyHttp = false;
+  bool listenAll = false;
   bool cursorApprovals = false;
   bool allowInstructions = false;
   bool cursorHooksInstalled = false;
@@ -115,6 +137,7 @@ class AgentService extends ChangeNotifier {
     final m = _readSettings();
     allowUnlock = m['allow_unlock'] == true;
     legacyHttp = m['legacy_http'] == true;
+    listenAll = m['listen_all'] == true;
     cursorApprovals = m['cursor_approvals'] == true;
     allowInstructions = m['allow_instructions'] == true;
   }
@@ -123,6 +146,39 @@ class AgentService extends ChangeNotifier {
     final m = _readSettings()..[key] = value;
     await File(settingsFile).writeAsString(jsonEncode(m));
     await Process.run('chmod', ['600', settingsFile]);
+  }
+
+  /// Avançado: escutar em todas as interfaces (padrão: só Wi‑Fi/Ethernet privadas).
+  /// O agente relê a opção sozinho e refaz o bind em até 5 s.
+  Future<void> setListenAll(bool on) async {
+    await _writeSetting('listen_all', on);
+    listenAll = on;
+    notifyListeners();
+  }
+
+  Set<String> _pairedIds() {
+    try {
+      final j = jsonDecode(File(devicesFile).readAsStringSync()) as Map<String, dynamic>;
+      return ((j['devices'] ?? {}) as Map<String, dynamic>).keys.toSet();
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// "Revogar este aparelho": apaga o token dele em devices.json (o agente relê o
+  /// arquivo a cada requisição; o celular passa a receber 401 e precisa do QR).
+  Future<void> revokeDevice(String deviceId) async {
+    try {
+      final f = File(devicesFile);
+      final j = jsonDecode(f.readAsStringSync()) as Map<String, dynamic>;
+      (j['devices'] as Map<String, dynamic>).remove(deviceId);
+      final tmp = File('$devicesFile.tmp');
+      await tmp.writeAsString(jsonEncode(j));
+      await Process.run('chmod', ['600', tmp.path]);
+      await tmp.rename(devicesFile);
+    } catch (_) {}
+    clients = clients.where((c) => c.deviceId != deviceId).toList();
+    notifyListeners();
   }
 
   /// "Permitir desbloqueio pelo celular" (padrão: desligado).
@@ -243,7 +299,9 @@ class AgentService extends ChangeNotifier {
   Future<String> _detectLanIp() async {
     try {
       final ifs = await NetworkInterface.list(type: InternetAddressType.IPv4);
-      bool skip(String n) => RegExp(r'^(lo|docker|br-|veth|virbr|tun|tap|vmnet|tailscale|zt)').hasMatch(n);
+      bool skip(String n) =>
+          RegExp(r'^(lo|docker|br-|veth|virbr|tun|tap|wg|vmnet|vboxnet|tailscale|zt|ppp|vpn|nordlynx|proton|tunnel)')
+              .hasMatch(n);
       final good = ifs.where((i) => !skip(i.name) && i.addresses.isNotEmpty).toList();
       good.sort((a, b) {
         int rank(String n) => RegExp(r'^(wl|en|eth)').hasMatch(n) ? 0 : 1;
@@ -289,10 +347,11 @@ class AgentService extends ChangeNotifier {
             // "127.0.0.1" são testes locais (ping do próprio app)
             .where((c) => c.ip != '127.0.0.1')
             .toList();
+        // só aparelhos ainda pareados; entradas antigas (por IP) não contam
+        final ids = _pairedIds();
+        list = list.where((c) => !c.legacy && ids.contains(c.deviceId)).toList();
         launches = list.fold(0, (a, c) => a + c.launches);
-        evs = ((j['events'] ?? []) as List)
-            .map((e) => EventInfo.fromJson(e as Map<String, dynamic>))
-            .toList();
+        evs = ((j['events'] ?? []) as List).map((e) => EventInfo.fromJson(e as Map<String, dynamic>)).toList();
       }
     } catch (_) {}
     final newEvent = evs.isNotEmpty && (events.isEmpty || evs.first.time != events.first.time);
@@ -301,7 +360,10 @@ class AgentService extends ChangeNotifier {
     _lastLaunches = launches;
     totalLaunches = launches;
     if (newEvent) notifyListeners();
-    if (up != running || ip != lanIp || list.length != clients.length || newLaunch ||
+    if (up != running ||
+        ip != lanIp ||
+        list.length != clients.length ||
+        newLaunch ||
         (list.isNotEmpty && clients.isNotEmpty && list.first.lastSeen != clients.first.lastSeen)) {
       running = up;
       lanIp = ip;
@@ -341,8 +403,11 @@ class AgentService extends ChangeNotifier {
         error = 'agent.py não encontrado.';
         return;
       }
-      _child = await Process.start('/usr/bin/python3', [path],
-          environment: {...Platform.environment, 'PYTHONUNBUFFERED': '1', 'MEU_NOTEBOOK_PORT': '$port'});
+      _child = await Process.start(
+        '/usr/bin/python3',
+        [path],
+        environment: {...Platform.environment, 'PYTHONUNBUFFERED': '1', 'MEU_NOTEBOOK_PORT': '$port'},
+      );
       _child!.stdout.drain();
       _child!.stderr.drain();
       _child!.exitCode.then((_) {

@@ -57,10 +57,10 @@ AppImage e tar.gz precisam de `python3`, `openssl`, GTK 3 e `libayatana-appindic
 **Verificar os arquivos** (`sha256sum -c SHA256SUMS` dentro de `releases/`):
 
 ```
-2717ed6a864c8b90e0c3f72c05879c40e42b9204eed9da5966fb84c1efe43d73  TAPKEY.apk
-004f07eb7ed4ea2092c7e48b917e4424210c1c084d11e4c2e3146e5701688e6f  tapkey-desktop_0.1.0_amd64.deb
-60014b848cd804192bfca15fe893d290557d41dbd0f44ca7dcb7b89bc371fedd  TAPKEY-Desktop-linux-x64.tar.gz
-8c03a4caa33159ba1fa48d896a07e8335e8c7c8a3fdc54d7f32d5cdf4e2d05f7  TAPKEY-Desktop-x86_64.AppImage
+2adf12ced7b4dcf60d98624f69fae1f482efebebee7384ce9be3cd8e31089299  TAPKEY.apk
+d9ec99cda3739e2a84ac80fbef02e38010666ca88b2518b54d498f2942f03e9c  tapkey-desktop_0.1.0_amd64.deb
+82a4de371d5282fee4b2ae3133e241615fdbbadc44f55b0c234a0f5243d7abe4  TAPKEY-Desktop-linux-x64.tar.gz
+c8dabc87511f6c657e18ccf543a4a2860d36351f817db7aa620e32b6681ceb25  TAPKEY-Desktop-x86_64.AppImage
 ```
 
 ## Índice
@@ -289,6 +289,9 @@ Sem `config.local.json` o app compila normalmente; basta parear pelo QR ou digit
 2. No app do celular: *Configurações > Escanear QR*. O app guarda o fingerprint e **só aceita o certificado com exatamente esse SHA-256** (nome, validade e emissor são ignorados; é o *pinning* que garante a identidade).
 3. O topo do app fica verde ("Conectado"). A etiqueta *Conexão criptografada (TLS) com certificado fixado* aparece em Configurações.
 
+- **Um token por aparelho:** ao escanear o QR, o celular gera um `device_id` aleatório e estável (guardado nele) e manda `X-Device-Id` + `X-Device-Name` (fabricante e modelo). O token do QR só serve para `POST /pair/register`, que devolve um **token só desse aparelho**; o app descarta o token do QR e passa a usar `X-Device-Token`. O agente guarda apenas o SHA‑256 em `devices.json` (0600).
+- **Lista de celulares no Desktop:** agrupada por aparelho (nome, último IP, última vez visto, requisições), não mais por IP, então trocar de IP pelo DHCP não cria "outro celular". Entradas antigas (por IP) são unidas pelo mesmo IP/MAC e deixam de contar. "online" = falou com o agente nos últimos 30 s.
+- **Revogar este aparelho:** botão ⛔ ao lado de cada celular. Apaga o token dele na hora (o agente relê `devices.json`); o celular passa a receber `401 {"revoked": true}`, avisa "Este aparelho foi revogado" e precisa escanear o QR de novo. Os outros continuam funcionando.
 - **Trocar de celular / revogar:** *Novo token* (gera outro token) ou *Revogar todos os celulares* (apaga o certificado, gera token novo e reinicia o agente), ambos no Desktop.
 - **Atualizando de uma versão antiga?** O agente agora usa HTTPS: escaneie o QR de novo.
 - **Modo HTTP legado** (Desktop > Segurança e Cursor): volta ao HTTP sem criptografia, só para celulares antigos que não possam escanear o QR. Um aviso explica que tráfego e token ficam expostos.
@@ -364,10 +367,11 @@ O relay lê o JSON do Cursor, **corta campos em 2 KB**, envia ao agente por `127
 
 ## API do agente
 
-Todas as rotas exigem o cabeçalho `X-Token` e HTTPS (certificado autoassinado, fingerprint fixado pelo app).
+Todas as rotas exigem HTTPS (certificado autoassinado, fingerprint fixado pelo app) e as credenciais do aparelho: `X-Device-Id`, `X-Device-Token` (e `X-Device-Name`). O token do QR (`X-Token`) só vale para `POST /pair/register` e `GET /ping`. Requisições de IP público (ou, no modo padrão, de fora da rede Wi‑Fi/Ethernet local) recebem `403`.
 
 | Método | Rota | Descrição |
 |---|---|---|
+| `POST` | `/pair/register` | Com `X-Token` (do QR) + `X-Device-Id`/`X-Device-Name`: devolve `{device_token}` só deste aparelho |
 | `GET` | `/ping` | Verifica se o agente está no ar |
 | `GET` | `/apps` | Lista `[{id, name, icon}]` dos aplicativos instalados |
 | `GET` | `/icon/<id>` | Ícone do aplicativo em PNG (404 se não houver) |
@@ -385,7 +389,11 @@ Todas as rotas exigem o cabeçalho `X-Token` e HTTPS (certificado autoassinado, 
 
 ```bash
 # certificado autoassinado: confira o fingerprint (SHA-256) do QR antes de usar -k
-curl -k -H "X-Token: $(cat ~/.config/tapkey/token)" https://IP:8765/apps
+# 1) registra um "aparelho" de teste e guarda o token dele
+DT=$(curl -sk -X POST -H "X-Token: $(cat ~/.config/tapkey/token)" -H "X-Device-Id: meu-curl-0001" \
+     -H "X-Device-Name: curl" https://IP:8765/pair/register | python3 -c 'import sys,json;print(json.load(sys.stdin)["device_token"])')
+# 2) usa as credenciais do aparelho
+curl -k -H "X-Device-Id: meu-curl-0001" -H "X-Device-Token: $DT" https://IP:8765/apps
 ```
 
 Rotas locais do relay (somente `127.0.0.1:8766`, nunca expostas na rede): `POST /hook` (cabeçalho `X-Hook-Secret`) e `GET /status` (sem segredo; usado pelo Desktop para saber se o agente está de pé).
@@ -395,11 +403,11 @@ Rotas locais do relay (somente `127.0.0.1:8766`, nunca expostas na rede): `POST 
 | Camada | Proteção |
 |---|---|
 | **Transporte** | TLS com certificado autoassinado EC P‑256 por instalação (`~/.config/tapkey/tls/`, chave 0600). O **SHA‑256 vai no QR** e o app o **fixa**: outro certificado = conexão recusada. Sem fingerprint, o app só fala HTTP se o *modo legado* estiver ligado |
-| **Autenticação** | Token compartilhado em `~/.config/tapkey/token` (0600) exigido em toda requisição; *Novo token* e *Revogar todos os celulares* no Desktop |
+| **Autenticação** | Token do QR (`~/.config/tapkey/token`, 0600) só para parear; depois, **token por aparelho** (só o hash SHA‑256 fica em `devices.json`, 0600). *Revogar este aparelho*, *Novo token* e *Revogar todos os celulares* no Desktop |
 | **O que pode ser aberto** | Somente IDs dos `.desktop` escaneados; a linha `Exec` nunca vem do celular; processos em sessão separada |
-| **Desbloqueio** | Desligado por padrão; desafio de uso único (HMAC), preso ao IP, 20 s, 5 tentativas/min; biometria/PIN no celular; tudo registrado |
+| **Desbloqueio** | Desligado por padrão; desafio de uso único (HMAC com a chave do aparelho), preso ao aparelho, 20 s, 5 tentativas/min; biometria/PIN no celular; tudo registrado |
 | **Cursor** | Tudo desligado por padrão; relay local autenticado por segredo; sem caminhos absolutos nem texto de prompt no celular; "Permitir" exige biometria/PIN; comandos longos só podem ser negados; instruções limitadas e auditadas; nunca `--force`/`--yolo`; nunca `xdotool` |
-| **Rede** | A porta do relay (`8766`) escuta **apenas em loopback**. Com `ufw`, libere `8765/tcp` só para a sua rede |
+| **Rede** | O agente escuta **só nos IPs privados das interfaces Wi‑Fi/Ethernet** (exclui `tun`/`tap`/`wg`/VPN/`tailscale`/`docker`/pontes de VM e interfaces ponto a ponto) e refaz o bind sozinho quando o IP muda (verifica a cada 5 s). Rejeita origem de IP público e, no modo padrão, de fora das redes dessas interfaces. Opção avançada *Escutar em todas as interfaces* (desligada; `listen_all`) volta ao `0.0.0.0`, ainda só para IPs privados. O relay (`8766`) escuta **apenas em loopback**. Com `ufw`, libere `8765/tcp` só para a sua rede |
 | **Repositório** | Nada secreto versionado: IP, token e fingerprint reais ficam em `config.local.json` (ignorado pelo git) |
 
 **Ameaças fora do escopo:** alguém com o celular desbloqueado e o app aberto pode abrir seus atalhos (o desbloqueio do notebook ainda pede biometria/PIN); malware já rodando como seu usuário no notebook lê os arquivos de `~/.config/tapkey`. Use em Wi‑Fi confiável.
@@ -411,7 +419,7 @@ Rotas locais do relay (somente `127.0.0.1:8766`, nunca expostas na rede): `POST 
 | `8765/tcp` | Agente (HTTPS; HTTP só no modo legado) |
 | `8766/tcp` (loopback) | Relay de hooks do Cursor e `/status` |
 
-Em `~/.config/tapkey/`: `token`, `tls/{cert.pem,key.pem,fingerprint}`, `settings.json` (`allow_unlock`, `legacy_http`, `cursor_integration`, `cursor_approvals`, `allow_instructions`, todos `false` por padrão), `hook_secret`, `hook.json`, `workspaces.json` (pastas vistas pelos hooks), `clients.json`, `events.log`, `cursor.log`, `icon_cache/`, `hooks/` e `cursor_hooks_state.json` (só se você instalar os hooks).
+Em `~/.config/tapkey/`: `token`, `tls/{cert.pem,key.pem,fingerprint}`, `devices.json` (aparelhos pareados; só hashes dos tokens), `settings.json` (`allow_unlock`, `legacy_http`, `listen_all`, `cursor_integration`, `cursor_approvals`, `allow_instructions`, todos `false` por padrão), `hook_secret`, `hook.json`, `workspaces.json` (pastas vistas pelos hooks), `clients.json`, `events.log`, `cursor.log`, `icon_cache/`, `hooks/` e `cursor_hooks_state.json` (só se você instalar os hooks).
 
 ## Estrutura do projeto
 
